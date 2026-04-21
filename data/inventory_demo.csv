@@ -1,0 +1,11 @@
+date,sku,category,warehouse,on_hand_qty,avg_daily_demand,lead_time_days,unit_cost
+2026-04-01,SKU-001,Electronics,WH-A,120,6,10,85
+2026-04-01,SKU-002,Electronics,WH-A,30,8,12,120
+2026-04-01,SKU-003,Home,WH-A,560,2,15,25
+2026-04-01,SKU-004,Home,WH-B,40,4,7,40
+2026-04-01,SKU-005,Beauty,WH-B,300,1,20,18
+2026-04-01,SKU-006,Beauty,WH-A,50,5,9,22
+2026-04-01,SKU-007,Sports,WH-B,18,3,14,110
+2026-04-01,SKU-008,Sports,WH-A,400,2,10,75
+2026-04-01,SKU-009,Food,WH-B,90,12,4,9
+2026-04-01,SKU-010,Food,WH-A,35,7,5,11

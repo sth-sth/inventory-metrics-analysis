@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: inventory-intelligence-cloud
+    env: docker
+    plan: free
+    autoDeploy: true
