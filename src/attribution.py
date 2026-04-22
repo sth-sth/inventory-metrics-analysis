@@ -294,6 +294,141 @@ def build_domain_detail_table(granular_row: pd.Series, language: str = "中文")
     return pd.DataFrame(rows).sort_values("score", ascending=False)
 
 
+def build_issue_breakdown(metric_row: pd.Series, language: str, stockout_threshold: float, overstock_doh: float, delay_days: float) -> pd.DataFrame:
+    """Return plain-language issue rows with raw values, thresholds, and deltas.
+
+    This avoids invented scores and keeps only direct business quantities.
+    """
+    issue_rows = []
+
+    avg_daily_demand = float(metric_row.get("avg_daily_demand", 0.0))
+    forecast_daily_demand = float(metric_row.get("forecast_daily_demand", avg_daily_demand))
+    demand_gap = avg_daily_demand - forecast_daily_demand
+    demand_pct = abs(demand_gap) / max(abs(forecast_daily_demand), 1e-9)
+
+    avg_delay_days = float(metric_row.get("avg_delay_days", 0.0))
+    delay_gap = avg_delay_days - delay_days
+
+    on_hand_qty = float(metric_row.get("on_hand_qty", 0.0))
+    reorder_point = float(metric_row.get("reorder_point", 0.0))
+    coverage_gap = float(metric_row.get("coverage_gap", on_hand_qty - reorder_point))
+
+    data_lag_days = float(metric_row.get("data_lag_days", 0.0))
+    cycle_count_accuracy = float(metric_row.get("cycle_count_accuracy", 0.0))
+    inventory_value = float(metric_row.get("inventory_value", on_hand_qty * float(metric_row.get("unit_cost", 0.0))))
+
+    if language == "中文":
+        issue_rows.extend(
+            [
+                {
+                    "问题": "需求预测偏差",
+                    "来自哪里": "inventory.csv + transactions.csv",
+                    "当前值": f"实际日均需求 {avg_daily_demand:.2f}，预测日均需求 {forecast_daily_demand:.2f}",
+                    "差了多少": f"差值 {demand_gap:+.2f}，相对误差 {demand_pct:.1%}",
+                    "怎么算": "把实际日均需求和预测日均需求相减，再除以预测值看偏差比例。",
+                    "建议看什么": "如果偏差很大，先让业务/计划人员判断是不是促销、季节或异常订单导致。",
+                },
+                {
+                    "问题": "收货延迟",
+                    "来自哪里": "transactions.csv",
+                    "当前值": f"平均延迟 {avg_delay_days:.2f} 天",
+                    "差了多少": f"比阈值 {delay_days:.2f} 天多 {delay_gap:+.2f} 天",
+                    "怎么算": "看收货流水里的 delay_days 平均值，再和你在页面上设的延迟阈值比较。",
+                    "建议看什么": "如果超出很多，先看是供应商问题还是运输问题。",
+                },
+                {
+                    "问题": "库存缺口",
+                    "来自哪里": "inventory.csv",
+                    "当前值": f"当前库存 {on_hand_qty:.2f}，再订货点 {reorder_point:.2f}",
+                    "差了多少": f"Gap {coverage_gap:+.2f}",
+                    "怎么算": "当前库存减去再订货点，负数就是缺货风险，正数就是富余。",
+                    "建议看什么": "如果是负数，先人工确认是否需要补货。",
+                },
+                {
+                    "问题": "库存覆盖过高",
+                    "来自哪里": "inventory.csv",
+                    "当前值": f"库存覆盖天数 {float(metric_row.get('doh', 0.0)):.2f} 天",
+                    "差了多少": f"比阈值 {overstock_doh:.2f} 天多 {float(metric_row.get('doh', 0.0)) - overstock_doh:+.2f} 天",
+                    "怎么算": "用当前库存除以日均需求，得到可以卖多少天。",
+                    "建议看什么": "如果天数过高，优先考虑减采、促销或清库存。",
+                },
+                {
+                    "问题": "信息滞后",
+                    "来自哪里": "transactions.csv",
+                    "当前值": f"数据滞后 {data_lag_days:.2f} 天",
+                    "差了多少": f"相当于晚了 {data_lag_days:.2f} 天",
+                    "怎么算": "用库存快照日期减去最近一笔交易日期。",
+                    "建议看什么": "如果滞后很大，先确认数据同步有没有问题。",
+                },
+                {
+                    "问题": "盘点准确率",
+                    "来自哪里": "transactions.csv",
+                    "当前值": f"盘点准确率 {cycle_count_accuracy:.2%}",
+                    "差了多少": f"离 100% 还差 {1 - cycle_count_accuracy:.2%}",
+                    "怎么算": "直接看 cycle_count_accuracy，越接近 100% 越好。",
+                    "建议看什么": "如果准确率低，先检查盘点流程。",
+                },
+            ]
+        )
+    else:
+        issue_rows.extend(
+            [
+                {
+                    "issue": "Demand forecast deviation",
+                    "source": "inventory.csv + transactions.csv",
+                    "current": f"actual daily demand {avg_daily_demand:.2f}, forecast daily demand {forecast_daily_demand:.2f}",
+                    "gap": f"delta {demand_gap:+.2f}, relative error {demand_pct:.1%}",
+                    "how": "Subtract forecast from actual daily demand, then compare the ratio to the forecast.",
+                    "what to check": "If this is large, ask planning/business whether seasonality or promotions caused it.",
+                },
+                {
+                    "issue": "Receipt delay",
+                    "source": "transactions.csv",
+                    "current": f"average delay {avg_delay_days:.2f} days",
+                    "gap": f"{delay_gap:+.2f} days vs threshold {delay_days:.2f}",
+                    "how": "Average the receipt delay_days in transaction logs and compare to the UI threshold.",
+                    "what to check": "If it is much higher, check supplier or transport first.",
+                },
+                {
+                    "issue": "Inventory gap",
+                    "source": "inventory.csv",
+                    "current": f"on-hand {on_hand_qty:.2f}, reorder point {reorder_point:.2f}",
+                    "gap": f"Gap {coverage_gap:+.2f}",
+                    "how": "On-hand minus reorder point. Negative means shortage risk, positive means buffer.",
+                    "what to check": "If negative, manually confirm whether replenishment is needed.",
+                },
+                {
+                    "issue": "High inventory coverage",
+                    "source": "inventory.csv",
+                    "current": f"days of inventory {float(metric_row.get('doh', 0.0)):.2f}",
+                    "gap": f"{float(metric_row.get('doh', 0.0)) - overstock_doh:+.2f} days vs threshold {overstock_doh:.2f}",
+                    "how": "Divide on-hand stock by average daily demand to get coverage days.",
+                    "what to check": "If too high, consider slower buying, promotion, or clearance.",
+                },
+                {
+                    "issue": "Data lag",
+                    "source": "transactions.csv",
+                    "current": f"data lag {data_lag_days:.2f} days",
+                    "gap": f"{data_lag_days:.2f} days late",
+                    "how": "Subtract the latest transaction date from the inventory snapshot date.",
+                    "what to check": "If lag is large, first verify whether data sync is broken.",
+                },
+                {
+                    "issue": "Cycle count accuracy",
+                    "source": "transactions.csv",
+                    "current": f"cycle count accuracy {cycle_count_accuracy:.2%}",
+                    "gap": f"{1 - cycle_count_accuracy:.2%} away from 100%",
+                    "how": "Use the stored cycle_count_accuracy directly; closer to 100% is better.",
+                    "what to check": "If accuracy is low, inspect the counting process.",
+                },
+            ]
+        )
+
+    out = pd.DataFrame(issue_rows)
+    out["inventory_value"] = inventory_value
+    return out
+
+
 FACTOR_MAP_EN = {
     "需求侧_预测不准": "demand_forecast_error",
     "需求侧_历史不足": "demand_insufficient_history",
