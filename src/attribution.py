@@ -295,4 +295,27 @@ def build_issue_breakdown(metric_row: pd.Series, language: str, stockout_thresho
             }
         )
 
-    return pd.DataFrame(cn_rows if language == "中文" else en_rows)
+    out = pd.DataFrame(cn_rows if language == "中文" else en_rows)
+    if language == "中文":
+        domain_map = {
+            "需求预测偏差": "需求侧",
+            "收货延迟": "供应侧",
+            "库存缺口": "仓储侧",
+            "库存覆盖过高": "仓储侧",
+            "信息滞后": "流程侧",
+            "盘点准确率": "流程侧",
+        }
+        if "问题" in out.columns:
+            out["分类"] = out["问题"].map(domain_map).fillna("其他")
+    else:
+        domain_map = {
+            "Demand forecast deviation": "Demand",
+            "Receipt delay": "Supply",
+            "Inventory gap": "Warehouse",
+            "High inventory coverage": "Warehouse",
+            "Data lag": "Process",
+            "Cycle count accuracy": "Process",
+        }
+        if "issue" in out.columns:
+            out["domain"] = out["issue"].map(domain_map).fillna("Other")
+    return out

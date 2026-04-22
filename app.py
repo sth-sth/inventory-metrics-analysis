@@ -64,53 +64,6 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
 
-def enrich_metrics_with_tx_signals(metrics_df: pd.DataFrame, transactions_df: pd.DataFrame) -> pd.DataFrame:
-    """Attach transaction-derived fields without fabricating defaults."""
-    if metrics_df.empty:
-        return metrics_df.copy()
-
-    out = metrics_df.copy()
-    tx = transactions_df.copy()
-    tx["date"] = pd.to_datetime(tx["date"], errors="coerce")
-
-    receipt_delay = (
-        tx[tx["event_type"] == "receipt"]
-        .groupby(["sku", "warehouse"], as_index=False)["delay_days"]
-        .mean()
-        .rename(columns={"delay_days": "avg_delay_days"})
-    )
-    latest_tx = tx.groupby(["sku", "warehouse"], as_index=False)["date"].max().rename(columns={"date": "latest_tx_date"})
-
-    out = out.merge(receipt_delay, on=["sku", "warehouse"], how="left")
-    out = out.merge(latest_tx, on=["sku", "warehouse"], how="left")
-
-    out["date"] = pd.to_datetime(out["date"], errors="coerce")
-    out["latest_tx_date"] = pd.to_datetime(out["latest_tx_date"], errors="coerce")
-    out["data_lag_days"] = (out["date"] - out["latest_tx_date"]).dt.days
-    return out
-
-
-def build_issue_inventory_table(
-    metrics_df: pd.DataFrame,
-    language: str,
-    stockout_threshold: float,
-    overstock_doh: float,
-    delay_days: float,
-) -> pd.DataFrame:
-    rows: list[pd.DataFrame] = []
-    for _, metric_row in metrics_df.iterrows():
-        issue_df = build_issue_breakdown(metric_row, language, stockout_threshold, overstock_doh, delay_days)
-        rows.append(issue_df)
-    if not rows:
-        return pd.DataFrame()
-
-    out = pd.concat(rows, ignore_index=True)
-    abs_col = "偏差绝对值" if language == "中文" else "absolute_gap"
-    if abs_col in out.columns:
-        out = out.sort_values(abs_col, ascending=False, na_position="last")
-    return out
-
-
 def render_calc_table(df: pd.DataFrame, key: str, language: str, col_help: dict[str, str] | None = None) -> None:
     if df is None or df.empty:
         st.dataframe(df, use_container_width=True)
@@ -121,7 +74,6 @@ def render_calc_table(df: pd.DataFrame, key: str, language: str, col_help: dict[
     try:
         event = st.dataframe(df, use_container_width=True, on_select="rerun", selection_mode="single-cell", key=key)
     except Exception:
-        # Streamlit < compatible versions do not support single-cell selection.
         select_mode = "single-row"
         event = st.dataframe(df, use_container_width=True, on_select="rerun", selection_mode="single-row", key=key)
         st.caption(
@@ -180,93 +132,6 @@ def render_calc_table(df: pd.DataFrame, key: str, language: str, col_help: dict[
     )
 
 
-def build_kpi_formula_chains(
-    filtered_metrics: pd.DataFrame,
-    filtered_tx: pd.DataFrame,
-    kpis: dict,
-    stockout_threshold: float,
-    overstock_doh: float,
-    language: str,
-) -> dict[str, pd.DataFrame]:
-    sales_sum = float(filtered_tx.loc[filtered_tx["event_type"] == "sale", "qty"].sum())
-    avg_on_hand = float(filtered_metrics["on_hand_qty"].mean()) if not filtered_metrics.empty else np.nan
-    stockout_count = int((filtered_metrics["coverage_gap"] < stockout_threshold).sum())
-    overstock_count = int((filtered_metrics["doh"] > overstock_doh).sum())
-    service_numerator = int((filtered_metrics["coverage_gap"] >= 0).sum())
-    sku_count = int(len(filtered_metrics))
-
-    if language == "中文":
-        return {
-            "kpi_value": pd.DataFrame(
-                [
-                    {"步骤": "先看每个 SKU", "说明": "每个 SKU 用在手库存数量乘以单价。"},
-                    {"步骤": "再把所有 SKU 加起来", "说明": f"最后得到总库存价值 ${kpis['total_inventory_value']:,.0f}"},
-                ]
-            ),
-            "kpi_so": pd.DataFrame(
-                [
-                    {"步骤": "先找出库存不够的 SKU", "说明": f"看 coverage_gap 是否小于 {stockout_threshold:.2f}"},
-                    {"步骤": "把这些 SKU 数一遍", "说明": f"当前共有 {stockout_count} 个 SKU 需要关注"},
-                ]
-            ),
-            "kpi_os": pd.DataFrame(
-                [
-                    {"步骤": "先找出库存太多的 SKU", "说明": f"看库存覆盖天数是否大于 {overstock_doh:.2f}"},
-                    {"步骤": "把这些 SKU 数一遍", "说明": f"当前共有 {overstock_count} 个 SKU 可能积压"},
-                ]
-            ),
-            "kpi_turn": pd.DataFrame(
-                [
-                    {"步骤": "先把销售量加总", "说明": f"交易流水里的销售数量合计是 {sales_sum:.2f}"},
-                    {"步骤": "再看平均库存", "说明": f"当前平均在手库存数量是 {avg_on_hand:.2f}"},
-                    {"步骤": "最后做除法", "说明": f"得到周转率代理 {kpis['inventory_turnover_proxy']:.2f}"},
-                ]
-            ),
-            "kpi_svc": pd.DataFrame(
-                [
-                    {"步骤": "先看有库存覆盖的 SKU", "说明": f"当前有 {service_numerator} 个 SKU 没有低于补货线"},
-                    {"步骤": "再除以总 SKU 数", "说明": f"总共 {sku_count} 个 SKU"},
-                    {"步骤": "得到服务水平代理", "说明": f"结果是 {kpis['service_level_proxy']:.1%}"},
-                ]
-            ),
-        }
-
-    return {
-        "kpi_value": pd.DataFrame(
-            [
-                {"step": "per SKU", "note": "Multiply on-hand quantity by unit cost for each SKU."},
-                {"step": "summary", "note": f"Add all SKU values to get ${kpis['total_inventory_value']:,.0f}."},
-            ]
-        ),
-        "kpi_so": pd.DataFrame(
-            [
-                {"step": "find low-stock SKUs", "note": f"Check whether coverage_gap is below {stockout_threshold:.2f}."},
-                {"step": "count them", "note": f"There are {stockout_count} SKUs to review."},
-            ]
-        ),
-        "kpi_os": pd.DataFrame(
-            [
-                {"step": "find overstocked SKUs", "note": f"Check whether days of inventory is above {overstock_doh:.2f}."},
-                {"step": "count them", "note": f"There are {overstock_count} SKUs to review."},
-            ]
-        ),
-        "kpi_turn": pd.DataFrame(
-            [
-                {"step": "sum sales quantity", "note": f"Total sales quantity is {sales_sum:.2f}."},
-                {"step": "check average stock", "note": f"Average on-hand quantity is {avg_on_hand:.2f}."},
-                {"step": "divide", "note": f"Turnover proxy becomes {kpis['inventory_turnover_proxy']:.2f}."},
-            ]
-        ),
-        "kpi_svc": pd.DataFrame(
-            [
-                {"step": "count covered SKUs", "note": f"{service_numerator} SKUs are above the reorder line."},
-                {"step": "divide by total SKUs", "note": f"Total SKU count is {sku_count}."},
-                {"step": "result", "note": f"Service-level proxy is {kpis['service_level_proxy']:.1%}."},
-            ]
-        ),
-    }
-
-
 def render_formula_button_table(label: str, table_df: pd.DataFrame, key: str, language: str) -> None:
     def _render_chain_card(df: pd.DataFrame) -> None:
         title = "计算说明" if language == "中文" else "Calculation Notes"
@@ -312,28 +177,228 @@ def render_selected_card(title: str, rows: list[dict[str, object]], language: st
     )
 
 
-def get_selected_point(state) -> dict[str, object] | None:
-    if state is None or not hasattr(state, "selection"):
-        return None
-    points = state.selection.get("points", [])
-    return points[0] if points else None
+def enrich_metrics_with_tx_signals(metrics_df: pd.DataFrame, transactions_df: pd.DataFrame) -> pd.DataFrame:
+    if metrics_df.empty:
+        return metrics_df.copy()
+
+    out = metrics_df.copy()
+    tx = transactions_df.copy()
+    tx["date"] = pd.to_datetime(tx["date"], errors="coerce")
+
+    receipt_delay = (
+        tx[tx["event_type"] == "receipt"]
+        .groupby(["sku", "warehouse"], as_index=False)["delay_days"]
+        .mean()
+        .rename(columns={"delay_days": "avg_delay_days"})
+    )
+    latest_tx = tx.groupby(["sku", "warehouse"], as_index=False)["date"].max().rename(columns={"date": "latest_tx_date"})
+
+    out = out.merge(receipt_delay, on=["sku", "warehouse"], how="left")
+    out = out.merge(latest_tx, on=["sku", "warehouse"], how="left")
+
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    out["latest_tx_date"] = pd.to_datetime(out["latest_tx_date"], errors="coerce")
+    out["data_lag_days"] = (out["date"] - out["latest_tx_date"]).dt.days
+    return out
 
 
-def _selected_point_value(point: dict[str, object], fallback_key: str = "x") -> object:
-    if fallback_key in point:
-        return point[fallback_key]
-    if "label" in point:
-        return point["label"]
-    if "customdata" in point:
-        return point["customdata"]
-    return None
+def build_issue_inventory_table(
+    metrics_df: pd.DataFrame,
+    language: str,
+    stockout_threshold: float,
+    overstock_doh: float,
+    delay_days: float,
+) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    for _, metric_row in metrics_df.iterrows():
+        issue_df = build_issue_breakdown(metric_row, language, stockout_threshold, overstock_doh, delay_days)
+        rows.append(issue_df)
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.concat(rows, ignore_index=True)
+    abs_col = "偏差绝对值" if language == "中文" else "absolute_gap"
+    if abs_col in out.columns:
+        out = out.sort_values(abs_col, ascending=False, na_position="last")
+    return out
+
+
+def build_kpi_formula_chains(filtered_metrics: pd.DataFrame, kpis: dict, language: str) -> dict[str, pd.DataFrame]:
+    sku_count = int(len(filtered_metrics))
+    if language == "中文":
+        return {
+            "kpi_in_stock": pd.DataFrame(
+                [
+                    {"步骤": "统计满足覆盖条件的 SKU", "说明": "coverage_gap >= 0 视为现货可覆盖。"},
+                    {"步骤": "除以 SKU 总数", "说明": f"现货率 = 满足条件 SKU / {sku_count}，结果 {kpis['in_stock_rate']:.1%}"},
+                ]
+            ),
+            "kpi_turnover": pd.DataFrame(
+                [
+                    {"步骤": "计算销货成本（COGS）", "说明": f"销售数量 * 单位成本，汇总得到 ${kpis['cogs_value']:,.0f}"},
+                    {"步骤": "计算平均存货", "说明": f"当前样本平均存货价值 ${kpis['avg_inventory_value']:,.0f}"},
+                    {"步骤": "周转率", "说明": f"周转率 = COGS / 平均存货 = {kpis['inventory_turnover']:.2f}"},
+                ]
+            ),
+            "kpi_turnover_days": pd.DataFrame(
+                [
+                    {"步骤": "从周转率换算", "说明": "周转天数 = 365 / 周转率。"},
+                    {"步骤": "结果", "说明": f"当前周转天数 {kpis['turnover_days']:.1f} 天"},
+                ]
+            ),
+            "kpi_slow_moving": pd.DataFrame(
+                [
+                    {"步骤": "识别慢销/滞销 SKU", "说明": f"销售为 0 或 DOH >= {kpis['slow_moving_doh_threshold']:.0f} 视为滞销。"},
+                    {"步骤": "计算占比", "说明": f"滞销率 = 滞销 SKU / 总 SKU，结果 {kpis['slow_moving_rate']:.1%}"},
+                ]
+            ),
+            "kpi_inventory_cost": pd.DataFrame(
+                [
+                    {"步骤": "库存总价值", "说明": f"当前库存总价值 ${kpis['total_inventory_value']:,.0f}"},
+                    {"步骤": "乘以库存资金占用率", "说明": f"库存成本 = 总价值 * {kpis['carrying_cost_rate']:.0%} = ${kpis['inventory_cost']:,.0f}"},
+                ]
+            ),
+        }
+
+    return {
+        "kpi_in_stock": pd.DataFrame(
+            [
+                {"step": "covered SKUs", "note": "Treat coverage_gap >= 0 as in-stock coverage."},
+                {"step": "divide by all SKUs", "note": f"In-stock rate = covered SKUs / {sku_count}, result {kpis['in_stock_rate']:.1%}."},
+            ]
+        ),
+        "kpi_turnover": pd.DataFrame(
+            [
+                {"step": "compute COGS", "note": f"Sales quantity * unit cost, aggregated COGS = ${kpis['cogs_value']:,.0f}."},
+                {"step": "average inventory", "note": f"Average inventory value = ${kpis['avg_inventory_value']:,.0f}."},
+                {"step": "turnover", "note": f"Turnover = COGS / avg inventory = {kpis['inventory_turnover']:.2f}."},
+            ]
+        ),
+        "kpi_turnover_days": pd.DataFrame(
+            [
+                {"step": "convert from turnover", "note": "Turnover days = 365 / turnover."},
+                {"step": "result", "note": f"Current turnover days = {kpis['turnover_days']:.1f} days."},
+            ]
+        ),
+        "kpi_slow_moving": pd.DataFrame(
+            [
+                {"step": "identify slow-moving SKUs", "note": f"No sales or DOH >= {kpis['slow_moving_doh_threshold']:.0f} is treated as slow-moving."},
+                {"step": "compute rate", "note": f"Slow-moving rate = slow-moving SKUs / all SKUs = {kpis['slow_moving_rate']:.1%}."},
+            ]
+        ),
+        "kpi_inventory_cost": pd.DataFrame(
+            [
+                {"step": "inventory value", "note": f"Current inventory value = ${kpis['total_inventory_value']:,.0f}."},
+                {"step": "carrying cost", "note": f"Inventory cost = value * {kpis['carrying_cost_rate']:.0%} = ${kpis['inventory_cost']:,.0f}."},
+            ]
+        ),
+    }
+
+
+def build_kpi_warning_table(kpis: dict, language: str, turnover_min: float, slow_moving_max: float, inventory_cost_max: float) -> pd.DataFrame:
+    if language == "中文":
+        rows = [
+            {
+                "指标": "现货率",
+                "当前值": f"{kpis['in_stock_rate']:.1%}",
+                "阈值": "建议 >= 95%",
+                "状态": "预警" if kpis["in_stock_rate"] < 0.95 else "正常",
+                "说明": "现货率低说明缺货风险上升。",
+            },
+            {
+                "指标": "周转率",
+                "当前值": f"{kpis['inventory_turnover']:.2f}",
+                "阈值": f"建议 >= {turnover_min:.2f}",
+                "状态": "预警" if kpis["inventory_turnover"] < turnover_min else "正常",
+                "说明": "周转率低说明库存周转慢。",
+            },
+            {
+                "指标": "周转天数",
+                "当前值": f"{kpis['turnover_days']:.1f}",
+                "阈值": "建议越低越好",
+                "状态": "预警" if kpis["turnover_days"] > 365 / max(turnover_min, 1e-9) else "正常",
+                "说明": "周转天数高说明库存占压时间长。",
+            },
+            {
+                "指标": "滞销率",
+                "当前值": f"{kpis['slow_moving_rate']:.1%}",
+                "阈值": f"建议 <= {slow_moving_max:.1%}",
+                "状态": "预警" if kpis["slow_moving_rate"] > slow_moving_max else "正常",
+                "说明": "滞销率高说明无销或慢销 SKU 偏多。",
+            },
+            {
+                "指标": "库存成本",
+                "当前值": f"${kpis['inventory_cost']:,.0f}",
+                "阈值": f"预算 <= ${inventory_cost_max:,.0f}",
+                "状态": "预警" if kpis["inventory_cost"] > inventory_cost_max else "正常",
+                "说明": "库存成本超预算会直接影响现金流。",
+            },
+        ]
+        return pd.DataFrame(rows)
+
+    rows = [
+        {
+            "metric": "In-stock rate",
+            "current": f"{kpis['in_stock_rate']:.1%}",
+            "threshold": ">= 95%",
+            "status": "Warning" if kpis["in_stock_rate"] < 0.95 else "OK",
+            "note": "Low in-stock rate indicates rising stockout risk.",
+        },
+        {
+            "metric": "Inventory turnover",
+            "current": f"{kpis['inventory_turnover']:.2f}",
+            "threshold": f">= {turnover_min:.2f}",
+            "status": "Warning" if kpis["inventory_turnover"] < turnover_min else "OK",
+            "note": "Low turnover means inventory is moving slowly.",
+        },
+        {
+            "metric": "Turnover days",
+            "current": f"{kpis['turnover_days']:.1f}",
+            "threshold": "Lower is better",
+            "status": "Warning" if kpis["turnover_days"] > 365 / max(turnover_min, 1e-9) else "OK",
+            "note": "Higher days indicate longer capital tie-up.",
+        },
+        {
+            "metric": "Slow-moving rate",
+            "current": f"{kpis['slow_moving_rate']:.1%}",
+            "threshold": f"<= {slow_moving_max:.1%}",
+            "status": "Warning" if kpis["slow_moving_rate"] > slow_moving_max else "OK",
+            "note": "High rate means many no-sale or slow-sale SKUs.",
+        },
+        {
+            "metric": "Inventory cost",
+            "current": f"${kpis['inventory_cost']:,.0f}",
+            "threshold": f"<= ${inventory_cost_max:,.0f}",
+            "status": "Warning" if kpis["inventory_cost"] > inventory_cost_max else "OK",
+            "note": "Over-budget inventory cost impacts cash flow.",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def build_issue_recommendations(issue_df: pd.DataFrame, language: str) -> pd.DataFrame:
+    if issue_df.empty:
+        return pd.DataFrame(columns=["分类", "问题", "建议"]) if language == "中文" else pd.DataFrame(columns=["domain", "issue", "action"])
+
+    if language == "中文":
+        watch = issue_df[issue_df.get("是否超阈值", "").isin(["是", "人工判断"])].copy()
+        if watch.empty:
+            watch = issue_df.copy()
+        out = watch[["分类", "问题", "差了多少", "建议看什么"]].drop_duplicates().rename(columns={"建议看什么": "建议"})
+        return out.reset_index(drop=True)
+
+    watch = issue_df[issue_df.get("out_of_bound", "").isin(["yes", "manual review"])].copy()
+    if watch.empty:
+        watch = issue_df.copy()
+    out = watch[["domain", "issue", "gap", "what_to_check"]].drop_duplicates().rename(columns={"what_to_check": "action"})
+    return out.reset_index(drop=True)
 
 
 TXT = {
     "中文": {
         "lang_picker": "界面语言",
         "title": "库存智能决策云",
-        "desc": "用于库存监控、风险归因、场景模拟和补货决策的可视化系统。",
+        "desc": "用于库存监控、归因识别、场景模拟和补货决策的可视化系统。",
         "panel": "控制面板",
         "source": "数据来源",
         "source_hint": "支持一键运行演示数据或上传真实业务 CSV",
@@ -360,38 +425,19 @@ TXT = {
         "download_inv": "下载库存演示 CSV",
         "download_tx": "下载交易演示 CSV",
         "preview_plan": "演示数据计算后预览",
-        "formula": "问题清单与计算说明",
-        "lineage": "数据来源与计算链路",
-        "lineage_tip": "先看来源字段，再看差了多少，再看怎么算。",
-        "metric_dict": "指标说明",
-        "abc_rule": "ABC 规则：按库存价值降序，累计占比 <=80% 为 A，80%-95% 为 B，其余为 C。",
-        "kpi_value": "库存总价值",
-        "kpi_so": "缺货风险 SKU",
-        "kpi_os": "超储风险 SKU",
-        "kpi_turn": "周转率代理",
-        "kpi_svc": "服务水平代理",
+        "kpi_in_stock": "现货率",
+        "kpi_turnover": "周转率（COGS/平均存货）",
+        "kpi_turnover_days": "周转天数",
+        "kpi_slow_moving": "滞销率",
+        "kpi_inventory_cost": "库存成本",
         "tab1": "总览",
         "tab2": "监控",
         "tab3": "归因",
         "tab4": "决策",
-        "granular_in_attr": "问题清单",
-        "granular_pick": "该 SKU 的问题清单",
-        "granular_lineage": "点击查看问题来源与计算",
-        "domain_scores": "问题总览",
         "health": "库存健康分布",
         "abc": "ABC 库存价值占比",
         "risk_map": "SKU 风险图",
         "alerts": "报警中心",
-        "diag_tip": "每个 SKU 展示直接的问题、差值和阈值，不看打分。",
-        "pick_sku": "选择 SKU 查看问题清单",
-        "trace": "点击查看该 SKU 问题链路",
-        "trace_table": "问题链路明细",
-        "delta_explain": "只看偏差和原始值，不看抽象分数。",
-        "domain_overview": "问题总览",
-        "top_factors": "主要问题（按差值排序）",
-        "factor_col": "问题",
-        "score_col": "差值",
-        "cell_tip": "点击表格任意单元格可查看悬浮卡片详情。",
         "recs": "业务建议",
         "sim": "场景模拟与补货优先级",
         "demand_shift": "需求变化（%）",
@@ -405,14 +451,12 @@ TXT = {
         "wh_filter": "按仓库筛选",
         "cat_filter": "按品类筛选",
         "kpi_formula_btn": "查看计算说明",
-        "kpi_formula_title": "KPI 计算说明",
-        "domain_formula_btn": "问题说明",
         "sim_formula_btn": "模拟说明",
     },
     "English": {
         "lang_picker": "Interface Language",
         "title": "Inventory Intelligence Cloud",
-        "desc": "Visual system for inventory monitoring, risk attribution, simulation, and replenishment decisions.",
+        "desc": "Visual system for inventory monitoring, issue identification, simulation, and replenishment decisions.",
         "panel": "Control Panel",
         "source": "Data Source",
         "source_hint": "Run built-in demo instantly or upload real business CSVs",
@@ -439,38 +483,19 @@ TXT = {
         "download_inv": "Download inventory demo CSV",
         "download_tx": "Download transactions demo CSV",
         "preview_plan": "Computed preview on demo data",
-        "formula": "Issue List and Calculation Notes",
-        "lineage": "Data Source and Calculation Lineage",
-        "lineage_tip": "Check source fields first, then the gap, then the calculation.",
-        "metric_dict": "Metric Dictionary",
-        "abc_rule": "ABC rule: sort by inventory value desc; cumulative share <=80% is A, 80%-95% is B, remaining is C.",
-        "kpi_value": "Total Inventory Value",
-        "kpi_so": "Stockout Risk SKU",
-        "kpi_os": "Overstock Risk SKU",
-        "kpi_turn": "Turnover Proxy",
-        "kpi_svc": "Service Level Proxy",
+        "kpi_in_stock": "In-stock Rate",
+        "kpi_turnover": "Inventory Turnover (COGS/Avg Inventory)",
+        "kpi_turnover_days": "Turnover Days",
+        "kpi_slow_moving": "Slow-moving Rate",
+        "kpi_inventory_cost": "Inventory Cost",
         "tab1": "Overview",
         "tab2": "Monitoring",
         "tab3": "Attribution",
         "tab4": "Actions",
-        "granular_in_attr": "Issue List",
-        "granular_pick": "Issue list for selected SKU",
-        "granular_lineage": "Click to view issue source and calculation",
-        "domain_scores": "Issue Overview",
         "health": "Inventory Health Distribution",
         "abc": "Inventory Value by ABC",
         "risk_map": "SKU Risk Map",
         "alerts": "Alert Center",
-        "diag_tip": "Each SKU shows direct issues, gaps, and thresholds, not scores.",
-        "pick_sku": "Select SKU for issue breakdown",
-        "trace": "Click to view SKU issue trace",
-        "trace_table": "Issue trace details",
-        "delta_explain": "Only gaps and raw values are shown, not abstract scores.",
-        "domain_overview": "Issue Overview",
-        "top_factors": "Main issues (sorted by gap)",
-        "factor_col": "factor",
-        "score_col": "score",
-        "cell_tip": "Click any table cell to open a floating detail card.",
         "recs": "Business Recommendations",
         "sim": "Scenario Simulation and Replenishment Priority",
         "demand_shift": "Demand shift (%)",
@@ -484,15 +509,17 @@ TXT = {
         "wh_filter": "Filter by warehouse",
         "cat_filter": "Filter by category",
         "kpi_formula_btn": "View Calculation Notes",
-        "kpi_formula_title": "KPI Calculation Notes",
-        "domain_formula_btn": "Issue Notes",
         "sim_formula_btn": "Simulation Notes",
     },
 }
 
 
 with st.sidebar:
-    language = st.selectbox("界面语言" if st.session_state.get("lang", "中文") == "中文" else "Interface Language", ["中文", "English"], index=0)
+    language = st.selectbox(
+        "界面语言" if st.session_state.get("lang", "中文") == "中文" else "Interface Language",
+        ["中文", "English"],
+        index=0,
+    )
     st.session_state["lang"] = language
     t = TXT[language]
 
@@ -511,6 +538,38 @@ with st.sidebar:
     st.subheader(t["decision"])
     budget_cap = st.number_input(t["budget"], min_value=0.0, value=15000.0, step=1000.0)
     target_service = st.slider(t["service"], min_value=0.80, max_value=0.99, value=0.95, step=0.01)
+    carrying_cost_rate = st.slider(
+        "库存资金占用率" if language == "中文" else "Inventory carrying cost rate",
+        min_value=0.05,
+        max_value=0.40,
+        value=0.20,
+        step=0.01,
+    )
+    slow_moving_doh_threshold = st.number_input(
+        "滞销判定 DOH 阈值" if language == "中文" else "Slow-moving DOH threshold",
+        min_value=30.0,
+        value=180.0,
+        step=10.0,
+    )
+    turnover_min_threshold = st.number_input(
+        "周转率预警下限" if language == "中文" else "Turnover warning lower bound",
+        min_value=0.1,
+        value=2.0,
+        step=0.1,
+    )
+    slow_moving_max_threshold = st.slider(
+        "滞销率预警上限" if language == "中文" else "Slow-moving rate warning upper bound",
+        min_value=0.05,
+        max_value=0.90,
+        value=0.30,
+        step=0.01,
+    )
+    inventory_cost_budget = st.number_input(
+        "库存成本预算上限" if language == "中文" else "Inventory cost budget cap",
+        min_value=0.0,
+        value=50000.0,
+        step=1000.0,
+    )
 
 
 st.markdown(
@@ -578,8 +637,6 @@ with st.expander(t["demo_block"], expanded=False):
         language=language,
     )
 
-st.caption("点图上的柱子、点、或按钮，就能看到它怎么计算出来。" if language == "中文" else "Click a bar, point, or button to see exactly how it is calculated.")
-
 metrics_df = abc_classification(build_inventory_metrics(inventory_df))
 alerts_df = detect_alerts(
     metrics_df,
@@ -607,35 +664,41 @@ if filtered_metrics.empty:
 filtered_alerts = alerts_df[alerts_df["warehouse"].isin(selected_wh)] if not alerts_df.empty else alerts_df
 filtered_tx = transactions_df[transactions_df["warehouse"].isin(selected_wh)].copy()
 filtered_metrics_for_attr = enrich_metrics_with_tx_signals(filtered_metrics, filtered_tx)
-recs_df = generate_recommendations(filtered_metrics, language)
-filtered_recs = recs_df[recs_df["sku"].isin(filtered_metrics["sku"]) | (recs_df["sku"] == "ALL")]
 
-kpis = build_kpi_summary(filtered_metrics, transactions_df[transactions_df["warehouse"].isin(selected_wh)])
-kpi_formula_chains = build_kpi_formula_chains(
-    filtered_metrics=filtered_metrics,
-    filtered_tx=filtered_tx,
-    kpis=kpis,
-    stockout_threshold=stockout_threshold,
-    overstock_doh=overstock_doh,
-    language=language,
+kpis = build_kpi_summary(
+    filtered_metrics,
+    transactions_df[transactions_df["warehouse"].isin(selected_wh)],
+    slow_moving_doh_threshold=slow_moving_doh_threshold,
+    carrying_cost_rate=carrying_cost_rate,
 )
+kpi_formula_chains = build_kpi_formula_chains(filtered_metrics=filtered_metrics, kpis=kpis, language=language)
 
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
-    st.metric(t["kpi_value"], f"${kpis['total_inventory_value']:,.0f}")
-    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_value"], key="kpi_value_formula", language=language)
+    st.metric(t["kpi_in_stock"], f"{kpis['in_stock_rate']:.1%}")
+    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_in_stock"], key="kpi_in_stock_formula", language=language)
 with k2:
-    st.metric(t["kpi_so"], f"{kpis['stockout_risk_sku_count']}")
-    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_so"], key="kpi_so_formula", language=language)
+    st.metric(t["kpi_turnover"], f"{kpis['inventory_turnover']:.2f}")
+    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_turnover"], key="kpi_turnover_formula", language=language)
 with k3:
-    st.metric(t["kpi_os"], f"{kpis['overstock_risk_sku_count']}")
-    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_os"], key="kpi_os_formula", language=language)
+    st.metric(t["kpi_turnover_days"], f"{kpis['turnover_days']:.1f}")
+    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_turnover_days"], key="kpi_turnover_days_formula", language=language)
 with k4:
-    st.metric(t["kpi_turn"], f"{kpis['inventory_turnover_proxy']:.2f}")
-    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_turn"], key="kpi_turn_formula", language=language)
+    st.metric(t["kpi_slow_moving"], f"{kpis['slow_moving_rate']:.1%}")
+    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_slow_moving"], key="kpi_slow_moving_formula", language=language)
 with k5:
-    st.metric(t["kpi_svc"], f"{kpis['service_level_proxy']:.1%}")
-    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_svc"], key="kpi_svc_formula", language=language)
+    st.metric(t["kpi_inventory_cost"], f"${kpis['inventory_cost']:,.0f}")
+    render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_inventory_cost"], key="kpi_inventory_cost_formula", language=language)
+
+kpi_warning_df = build_kpi_warning_table(
+    kpis=kpis,
+    language=language,
+    turnover_min=turnover_min_threshold,
+    slow_moving_max=slow_moving_max_threshold,
+    inventory_cost_max=inventory_cost_budget,
+)
+st.subheader("KPI 预警" if language == "中文" else "KPI Warnings")
+render_calc_table(kpi_warning_df, key="kpi_warning_table", language=language)
 
 st.markdown("### " + ("点图看计算" if language == "中文" else "Click the chart to see the calculation"))
 st.caption("图上的柱子或点，会直接展开底层计算说明。" if language == "中文" else "Click any bar or point on the charts to expand the underlying calculation notes.")
@@ -666,54 +729,56 @@ with tab2:
 
 with tab3:
     st.caption(
-        "这里是全量 SKU 的真实偏差清单，点任意单元格即可看来源和计算说明。"
+        "这里是全量 SKU 的真实偏差清单，按四个侧筛选后点任意单元格即可看来源和计算说明。"
         if language == "中文"
-        else "This is the full real-deviation list across SKUs. Click any cell to view source and calculation notes."
+        else "This is the full real-deviation inventory across SKUs. Filter by the four domains, then click any cell for source and calculation details."
     )
 
-    if filtered_metrics_for_attr.empty:
-        st.info("当前筛选下暂无可用归因数据。" if language == "中文" else "No attribution data under current filters.")
+    issue_inventory_df = build_issue_inventory_table(
+        metrics_df=filtered_metrics_for_attr,
+        language=language,
+        stockout_threshold=stockout_threshold,
+        overstock_doh=overstock_doh,
+        delay_days=delay_days,
+    )
+
+    if language == "中文":
+        domain_options = ["需求侧", "供应侧", "仓储侧", "流程侧"]
+        selected_domains = st.multiselect("按分类筛选", options=domain_options, default=domain_options)
+        issue_view_df = issue_inventory_df[issue_inventory_df["分类"].isin(selected_domains)].copy() if "分类" in issue_inventory_df.columns else issue_inventory_df
     else:
-        issue_inventory_df = build_issue_inventory_table(
-            metrics_df=filtered_metrics_for_attr,
-            language=language,
-            stockout_threshold=stockout_threshold,
-            overstock_doh=overstock_doh,
-            delay_days=delay_days,
-        )
+        domain_options = ["Demand", "Supply", "Warehouse", "Process"]
+        selected_domains = st.multiselect("Filter by domain", options=domain_options, default=domain_options)
+        issue_view_df = issue_inventory_df[issue_inventory_df["domain"].isin(selected_domains)].copy() if "domain" in issue_inventory_df.columns else issue_inventory_df
 
-        st.markdown("#### " + ("真实业务偏差清单" if language == "中文" else "Real Business Deviation Inventory"))
-        st.caption(
-            "不做因子分和域分，不做归一化比较，只保留原始值、阈值和偏差量。"
-            if language == "中文"
-            else "No factor/domain scores and no normalized comparison. Only raw values, thresholds, and deviation amounts."
-        )
+    st.markdown("#### " + ("四侧问题识别清单" if language == "中文" else "Four-domain Issue Inventory"))
+    render_calc_table(issue_view_df, key="all_issue_inventory_table", language=language)
 
-        render_calc_table(issue_inventory_df, key="all_issue_inventory_table", language=language)
+    issue_rec_df = build_issue_recommendations(issue_view_df, language)
+    st.subheader("自动化建议" if language == "中文" else "Automated Suggestions")
+    render_calc_table(issue_rec_df, key="issue_recommendation_table", language=language)
 
-        if not issue_inventory_df.empty:
-            main_issue = issue_inventory_df.iloc[0]
-            if language == "中文":
-                card_rows = [
-                    {"SKU": main_issue.get("sku", ""), "仓库": main_issue.get("warehouse", ""), "问题": main_issue.get("问题", "")},
-                    {"当前值": main_issue.get("当前值", ""), "阈值/基准": main_issue.get("阈值/基准", ""), "差了多少": main_issue.get("差了多少", "")},
-                    {"是否超阈值": main_issue.get("是否超阈值", ""), "怎么算": main_issue.get("怎么算", "")},
-                    {"建议看什么": main_issue.get("建议看什么", "")},
-                ]
-            else:
-                card_rows = [
-                    {"SKU": main_issue.get("sku", ""), "warehouse": main_issue.get("warehouse", ""), "issue": main_issue.get("issue", "")},
-                    {"current": main_issue.get("current", ""), "baseline": main_issue.get("baseline", ""), "gap": main_issue.get("gap", "")},
-                    {"out_of_bound": main_issue.get("out_of_bound", ""), "how": main_issue.get("how", "")},
-                    {"what_to_check": main_issue.get("what_to_check", "")},
-                ]
-            render_selected_card(
-                "已选问题" if language == "中文" else "Selected issue",
-                card_rows,
-                language,
-            )
+    if not issue_view_df.empty:
+        main_issue = issue_view_df.iloc[0]
+        if language == "中文":
+            card_rows = [
+                {"分类": main_issue.get("分类", ""), "SKU": main_issue.get("sku", ""), "仓库": main_issue.get("warehouse", "")},
+                {"问题": main_issue.get("问题", ""), "当前值": main_issue.get("当前值", ""), "差了多少": main_issue.get("差了多少", "")},
+                {"是否超阈值": main_issue.get("是否超阈值", ""), "怎么算": main_issue.get("怎么算", "")},
+                {"建议": main_issue.get("建议看什么", "")},
+            ]
+        else:
+            card_rows = [
+                {"domain": main_issue.get("domain", ""), "SKU": main_issue.get("sku", ""), "warehouse": main_issue.get("warehouse", "")},
+                {"issue": main_issue.get("issue", ""), "current": main_issue.get("current", ""), "gap": main_issue.get("gap", "")},
+                {"out_of_bound": main_issue.get("out_of_bound", ""), "how": main_issue.get("how", "")},
+                {"action": main_issue.get("what_to_check", "")},
+            ]
+        render_selected_card("已选问题" if language == "中文" else "Selected issue", card_rows, language)
 
 with tab4:
+    recs_df = generate_recommendations(filtered_metrics, language)
+    filtered_recs = recs_df[recs_df["sku"].isin(filtered_metrics["sku"]) | (recs_df["sku"] == "ALL")]
     st.subheader(t["recs"])
     render_calc_table(filtered_recs, key="recs_table", language=language)
 
@@ -734,39 +799,6 @@ with tab4:
     r1.metric(t["risk_now"], int((filtered_metrics["coverage_gap"] < 0).sum()))
     r2.metric(t["risk_sim"], int((sim_metrics["coverage_gap"] < 0).sum()))
     r3.metric(t["var_sim"], f"${float(sim_metrics.loc[sim_metrics['coverage_gap'] < 0, 'inventory_value'].sum()):,.0f}")
-    with r1:
-        render_formula_button_table(
-            t["sim_formula_btn"],
-            pd.DataFrame([
-                {("步骤" if language == "中文" else "step"): ("条件" if language == "中文" else "condition"),
-                 ("表达式" if language == "中文" else "expression"): "coverage_gap < 0",
-                 ("结果" if language == "中文" else "result"): int((filtered_metrics["coverage_gap"] < 0).sum())}
-            ]),
-            key="sim_formula_now",
-            language=language,
-        )
-    with r2:
-        render_formula_button_table(
-            t["sim_formula_btn"],
-            pd.DataFrame([
-                {("步骤" if language == "中文" else "step"): ("条件" if language == "中文" else "condition"),
-                 ("表达式" if language == "中文" else "expression"): "coverage_gap < 0 (simulated)",
-                 ("结果" if language == "中文" else "result"): int((sim_metrics["coverage_gap"] < 0).sum())}
-            ]),
-            key="sim_formula_sim",
-            language=language,
-        )
-    with r3:
-        render_formula_button_table(
-            t["sim_formula_btn"],
-            pd.DataFrame([
-                {("步骤" if language == "中文" else "step"): ("条件" if language == "中文" else "condition"),
-                 ("表达式" if language == "中文" else "expression"): "sum(inventory_value where coverage_gap < 0)",
-                 ("结果" if language == "中文" else "result"): f"${float(sim_metrics.loc[sim_metrics['coverage_gap'] < 0, 'inventory_value'].sum()):,.0f}"}
-            ]),
-            key="sim_formula_var",
-            language=language,
-        )
 
     plan = sim_metrics.copy()
     plan["base_order_qty"] = np.maximum(plan["reorder_point"] - plan["on_hand_qty"], 0)
