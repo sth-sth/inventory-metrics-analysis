@@ -85,7 +85,7 @@ Upload both files:
 - delay_days
 - supplier
 
-## 5. Formula Transparency / 公式透明化（细粒度评分）
+## 5. Issue Transparency / 问题透明化（不打分）
 
 ### Core formulas / 核心公式
 
@@ -95,14 +95,14 @@ Upload both files:
 - reorder_point = lead_time_demand + safety_stock
 - coverage_gap = on_hand_qty - reorder_point
 
-### Granular scoring / 细粒度评分
+### Issue breakdown / 问题拆解
 
-- Demand forecast error = |actual demand - forecast demand| / forecast demand, normalized to 0-1
-- Supplier delay score = avg_delay_days / 7, normalized to 0-1
-- ROP setting score = |coverage_gap| / reorder_point, normalized to 0-1
-- Info sync score = info_sync_delay_days / 5, normalized to 0-1
-- Domain score = mean of the factors in that domain
-- Overall score = mean of all factors across four domains
+- Demand forecast deviation: actual daily demand vs forecast daily demand
+- Receipt delay: average receipt delay vs the threshold in the sidebar
+- Inventory gap: on-hand quantity minus reorder point
+- High inventory coverage: days of inventory vs the overstock threshold
+- Data lag: inventory snapshot date vs the latest transaction date
+- Cycle count accuracy: stored accuracy value vs 100%
 
 ### Replenishment base qty / 补货基础量
 
