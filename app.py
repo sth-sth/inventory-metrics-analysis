@@ -85,6 +85,11 @@ TXT = {
         "preview_tx": "交易演示数据预览（前 10 行）",
         "download_inv": "下载库存示例 CSV",
         "download_tx": "下载交易示例 CSV",
+        "preview_plan": "计划值/基准值样例（由演示数据自动计算）",
+        "lineage": "数据来源与计算链路",
+        "lineage_tip": "先看来源字段，再看每一步怎么算，最后看偏差如何得出。",
+        "metric_dict": "指标与计算逻辑字典（含 ABC）",
+        "abc_rule": "ABC 规则：按库存价值从高到低排序，累计占比 <=80% 为 A，80%-95% 为 B，其余为 C。",
         "kpi_value": "库存总价值",
         "kpi_so": "缺货风险 SKU",
         "kpi_os": "超储风险 SKU",
@@ -103,6 +108,7 @@ TXT = {
         "step_delta": "步骤偏差（正数=高于基准，负数=低于基准）",
         "step_table": "步骤明细",
         "factor_table": "因子贡献",
+        "delta_explain": "偏差计算：偏差 = 实际值 - 计划值（或基准值）",
         "recs": "业务建议",
         "sim": "场景模拟与补货优先级",
         "demand_shift": "需求变化（%）",
@@ -144,6 +150,11 @@ TXT = {
         "preview_tx": "Transactions demo preview (top 10)",
         "download_inv": "Download inventory sample CSV",
         "download_tx": "Download transactions sample CSV",
+        "preview_plan": "Planned / benchmark value examples (computed from demo data)",
+        "lineage": "Data Source and Calculation Lineage",
+        "lineage_tip": "First see source columns, then formulas, then how deltas are computed.",
+        "metric_dict": "Metric and Calculation Dictionary (including ABC)",
+        "abc_rule": "ABC rule: sort by inventory value desc; cumulative share <=80% is A, 80%-95% is B, remaining is C.",
         "kpi_value": "Total Inventory Value",
         "kpi_so": "Stockout Risk SKU",
         "kpi_os": "Overstock Risk SKU",
@@ -162,6 +173,7 @@ TXT = {
         "step_delta": "Step Delta (positive=above benchmark, negative=below)",
         "step_table": "Step Breakdown",
         "factor_table": "Factor Contribution",
+        "delta_explain": "Delta formula: Delta = Actual - Planned (or Benchmark)",
         "recs": "Business Recommendations",
         "sim": "Scenario Simulation and Replenishment Priority",
         "demand_shift": "Demand shift (%)",
@@ -233,6 +245,7 @@ else:
 
 with st.expander(t["demo_block"], expanded=False):
     demo_inv, demo_tx = load_demo_data()
+    demo_plan = abc_classification(build_inventory_metrics(demo_inv))
     c1, c2 = st.columns(2)
     with c1:
         st.write(t["preview_inv"])
@@ -243,6 +256,23 @@ with st.expander(t["demo_block"], expanded=False):
         st.dataframe(demo_tx.head(10), use_container_width=True)
         st.download_button(t["download_tx"], to_csv_bytes(demo_tx), "transactions_demo.csv", "text/csv")
 
+    st.write(t["preview_plan"])
+    st.dataframe(
+        demo_plan[[
+            "sku",
+            "warehouse",
+            "on_hand_qty",
+            "avg_daily_demand",
+            "lead_time_days",
+            "lead_time_demand",
+            "safety_stock",
+            "reorder_point",
+            "coverage_gap",
+            "abc_class",
+        ]].head(10),
+        use_container_width=True,
+    )
+
 with st.expander(t["formula"], expanded=False):
     if language == "中文":
         st.markdown(
@@ -250,42 +280,34 @@ with st.expander(t["formula"], expanded=False):
 ### 1) 库存覆盖天数（Days of Inventory）
 
 $$
-\text{库存覆盖天数} = \frac{\text{当前库存数量}}{\text{日均需求数量}}
+	ext{库存覆盖天数} = \frac{\text{当前库存数量}}{\text{日均需求数量}}
 $$
-
-含义：当前库存大约还能支持多少天销售。
 
 ### 2) 交期需求量（Lead-time Demand）
 
 $$
-\text{交期需求量} = \text{日均需求数量} \times \text{补货交期天数}
+	ext{交期需求量} = \text{日均需求数量} \times \text{补货交期天数}
 $$
-
-含义：在补货到达前，预计会消耗多少库存。
 
 ### 3) 安全库存（Safety Stock）
 
 $$
-\text{安全库存} = z \times \text{需求波动标准差} \times \sqrt{\text{补货交期天数}}
+	ext{安全库存} = z \times \text{需求波动标准差} \times \sqrt{\text{补货交期天数}}
 $$
-
-含义：用于防止波动导致断货的缓冲库存。
 
 ### 4) 再订货点（Reorder Point）
 
 $$
-\text{再订货点} = \text{交期需求量} + \text{安全库存}
+	ext{再订货点} = \text{交期需求量} + \text{安全库存}
 $$
 
 ### 5) Gap（库存缺口）
 
 $$
-\text{Gap} = \text{当前库存数量} - \text{再订货点}
+	ext{Gap} = \text{当前库存数量} - \text{再订货点}
 $$
 
-解释：
-- Gap < 0：低于补货安全线，缺货风险更高。
-- Gap > 0：高于补货安全线，库存更安全。
+解释：Gap < 0 表示低于补货安全线，Gap > 0 表示高于补货安全线。
 """
         )
     else:
@@ -294,44 +316,95 @@ $$
 ### 1) Days of Inventory
 
 $$
-\text{Days of Inventory} = \frac{\text{On-hand Quantity}}{\text{Average Daily Demand}}
+	ext{Days of Inventory} = \frac{\text{On-hand Quantity}}{\text{Average Daily Demand}}
 $$
-
-Meaning: how many days current stock can support.
 
 ### 2) Lead-time Demand
 
 $$
-\text{Lead-time Demand} = \text{Average Daily Demand} \times \text{Lead-time Days}
+	ext{Lead-time Demand} = \text{Average Daily Demand} \times \text{Lead-time Days}
 $$
-
-Meaning: expected consumption before replenishment arrives.
 
 ### 3) Safety Stock
 
 $$
-\text{Safety Stock} = z \times \text{Demand Std Dev} \times \sqrt{\text{Lead-time Days}}
+	ext{Safety Stock} = z \times \text{Demand Std Dev} \times \sqrt{\text{Lead-time Days}}
 $$
-
-Meaning: buffer stock against demand and lead-time uncertainty.
 
 ### 4) Reorder Point
 
 $$
-\text{Reorder Point} = \text{Lead-time Demand} + \text{Safety Stock}
+	ext{Reorder Point} = \text{Lead-time Demand} + \text{Safety Stock}
 $$
 
 ### 5) Gap
 
 $$
-\text{Gap} = \text{On-hand Quantity} - \text{Reorder Point}
+	ext{Gap} = \text{On-hand Quantity} - \text{Reorder Point}
 $$
 
-Interpretation:
-- Gap < 0: below safety line, higher stockout risk.
-- Gap > 0: above safety line, safer inventory position.
+Interpretation: Gap < 0 means below safety line; Gap > 0 means safer coverage.
 """
         )
+
+with st.expander(t["lineage"], expanded=False):
+    st.caption(t["lineage_tip"])
+    if language == "中文":
+        st.markdown(
+            """
+| 步骤 | 输入来源 | 输出字段 | 说明 |
+|---|---|---|---|
+| 库存基础数据 | `inventory.csv` | `on_hand_qty`, `avg_daily_demand`, `lead_time_days`, `unit_cost` | 原始库存和需求数据 |
+| 交易数据 | `transactions.csv` | `event_type`, `qty`, `delay_days` | 销售/入库/延迟信息 |
+| 计划值计算 | 库存基础数据 | `lead_time_demand`, `safety_stock`, `reorder_point` | 形成计划值/基准值 |
+| 偏差计算 | 实际值 + 计划值 | `coverage_gap`, `demand_delta`, `delay_delta`, `planning_delta` | 偏差 = 实际 - 计划 |
+| 归因贡献 | 偏差与信号 | `impact_score` | 偏差标准化后的贡献占比 |
+"""
+        )
+    else:
+        st.markdown(
+            """
+| Step | Source Input | Output Fields | Description |
+|---|---|---|---|
+| Inventory base | `inventory.csv` | `on_hand_qty`, `avg_daily_demand`, `lead_time_days`, `unit_cost` | Raw stock and demand data |
+| Transactions | `transactions.csv` | `event_type`, `qty`, `delay_days` | Sales/receipt/delay events |
+| Planned value | Inventory base | `lead_time_demand`, `safety_stock`, `reorder_point` | Planned/benchmark values |
+| Delta calculation | Actual + planned | `coverage_gap`, `demand_delta`, `delay_delta`, `planning_delta` | Delta = Actual - Planned |
+| Attribution score | Deltas and signals | `impact_score` | Normalized contribution |
+"""
+        )
+
+with st.expander(t["metric_dict"], expanded=False):
+    if language == "中文":
+        st.markdown(
+            """
+- 库存总价值：`on_hand_qty * unit_cost`
+- 缺货风险：`coverage_gap < 阈值`
+- 超储风险：`库存覆盖天数 > 阈值`
+- 周转率代理：`销售总量 / 平均库存数量`
+- 服务水平代理：`coverage_gap >= 0` 的 SKU 占比
+- 需求偏差：`(销售量-入库量) - 基准(销售量-入库量)`
+- 延迟偏差：`平均延迟天数 - 基准延迟天数`
+- 计划偏差：`|Gap| - 基准|Gap|`
+- ABC：按库存价值降序，累计占比 <=80% 为 A，80%-95% 为 B，>95% 为 C
+"""
+        )
+        st.info(t["abc_rule"])
+    else:
+        st.markdown(
+            """
+- Total inventory value: `on_hand_qty * unit_cost`
+- Stockout risk: `coverage_gap < threshold`
+- Overstock risk: `days_of_inventory > threshold`
+- Turnover proxy: `total_sales_qty / average_inventory_qty`
+- Service-level proxy: share of SKUs where `coverage_gap >= 0`
+- Demand delta: `(sales_qty - receipt_qty) - benchmark(sales_qty - receipt_qty)`
+- Delay delta: `avg_delay_days - benchmark_delay_days`
+- Planning delta: `|Gap| - benchmark|Gap|`
+- ABC: sort by value desc; cumulative <=80% is A, 80%-95% is B, >95% is C
+"""
+        )
+        st.info(t["abc_rule"])
 
 metrics_df = abc_classification(build_inventory_metrics(inventory_df))
 
@@ -405,6 +478,7 @@ with tab2:
 
 with tab3:
     st.caption(t["diag_tip"])
+    st.info(t["delta_explain"])
     if filtered_steps.empty:
         st.info("当前阈值下没有缺货风险 SKU。" if language == "中文" else "No stockout-risk SKU under current thresholds.")
     else:
@@ -436,7 +510,44 @@ with tab3:
         st.plotly_chart(px.bar(chart_df, x=chart_df.columns[0], y=chart_df.columns[1], title=t["step_delta"]), use_container_width=True)
 
         st.subheader(t["step_table"])
-        st.dataframe(sku_step, use_container_width=True)
+        step_view = sku_step[[
+            "sku",
+            "warehouse",
+            "sales_qty",
+            "receipt_qty",
+            "sales_minus_receipt",
+            "bench_sales_gap",
+            "demand_delta",
+            "avg_delay_days",
+            "bench_delay",
+            "delay_delta",
+            "abs_gap",
+            "bench_gap",
+            "planning_delta",
+            "dominant_factor",
+            "confidence",
+        ]].copy()
+        if language == "中文":
+            step_view = step_view.rename(
+                columns={
+                    "sku": "SKU",
+                    "warehouse": "仓库",
+                    "sales_qty": "实际销售量",
+                    "receipt_qty": "实际入库量",
+                    "sales_minus_receipt": "实际(销售-入库)",
+                    "bench_sales_gap": "计划值(销售-入库)",
+                    "demand_delta": "需求偏差",
+                    "avg_delay_days": "实际平均延迟天",
+                    "bench_delay": "计划值延迟天",
+                    "delay_delta": "延迟偏差",
+                    "abs_gap": "实际|Gap|",
+                    "bench_gap": "计划值|Gap|",
+                    "planning_delta": "计划偏差",
+                    "dominant_factor": "主导因子",
+                    "confidence": "置信度",
+                }
+            )
+        st.dataframe(step_view, use_container_width=True)
 
         st.subheader(t["factor_table"])
         st.dataframe(sku_attr, use_container_width=True)
