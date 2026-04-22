@@ -771,7 +771,10 @@ with tab3:
 
         checklist_df = build_business_checklist(sku_issue_df, language)
         st.subheader("业务核对清单" if language == "中文" else "Business checklist")
-        render_calc_table(checklist_df, key="business_checklist_table", language=language)
+        if checklist_df.empty:
+            st.info("当前 SKU 没有需要核对的问题。" if language == "中文" else "No issues need business review for the selected SKU.")
+        else:
+            render_calc_table(checklist_df, key="business_checklist_table", language=language)
 
         if language == "中文":
             domain_options = ["需求侧", "供应侧", "仓储侧", "流程侧"]
