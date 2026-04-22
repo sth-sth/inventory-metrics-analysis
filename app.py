@@ -103,31 +103,52 @@ def _en_factor_name(name: str) -> str:
 
 
 def render_calc_table(df: pd.DataFrame, key: str, language: str, col_help: dict[str, str] | None = None) -> None:
+    if df is None or df.empty:
+        st.dataframe(df, use_container_width=True)
+        return
+
     event = None
+    select_mode = "single-cell"
     try:
         event = st.dataframe(df, use_container_width=True, on_select="rerun", selection_mode="single-cell", key=key)
-    except TypeError:
-        st.dataframe(df, use_container_width=True)
-        st.caption("当前版本不支持单元格点击详情。" if language == "中文" else "Current version does not support cell-click details.")
-        return
+    except Exception:
+        # Streamlit < compatible versions do not support single-cell selection.
+        select_mode = "single-row"
+        event = st.dataframe(df, use_container_width=True, on_select="rerun", selection_mode="single-row", key=key)
+        st.caption(
+            "当前环境不支持单元格直接点击，已切换为行选择+列选择详情。"
+            if language == "中文"
+            else "Cell selection is not supported in this Streamlit version. Switched to row + column detail mode."
+        )
 
     if event is None or not hasattr(event, "selection"):
         return
-    cells = event.selection.get("cells", [])
-    if not cells:
-        return
 
-    cell = cells[0]
-    row_idx = int(cell.get("row", 0))
-    col_ref = cell.get("column")
-    if isinstance(col_ref, int):
-        if col_ref < 0 or col_ref >= len(df.columns):
+    if select_mode == "single-cell":
+        cells = event.selection.get("cells", [])
+        if not cells:
             return
-        col_name = str(df.columns[col_ref])
+        cell = cells[0]
+        row_idx = int(cell.get("row", 0))
+        col_ref = cell.get("column")
+        if isinstance(col_ref, int):
+            if col_ref < 0 or col_ref >= len(df.columns):
+                return
+            col_name = str(df.columns[col_ref])
+        else:
+            col_name = str(col_ref)
+            if col_name not in df.columns:
+                return
     else:
-        col_name = str(col_ref)
-        if col_name not in df.columns:
+        rows = event.selection.get("rows", [])
+        if not rows:
             return
+        row_idx = int(rows[0])
+        col_name = st.selectbox(
+            "选择列查看详情" if language == "中文" else "Pick a column for details",
+            options=[str(c) for c in df.columns],
+            key=f"{key}_fallback_col",
+        )
 
     value = df.iloc[row_idx][col_name]
     row_label = f"第 {row_idx + 1} 行" if language == "中文" else f"Row {row_idx + 1}"
