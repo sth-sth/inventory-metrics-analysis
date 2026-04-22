@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -9,7 +7,7 @@ import streamlit as st
 
 from src.alerts import AlertConfig, detect_alerts
 from src.attribution import build_issue_breakdown
-from src.data_io import load_bundle, load_inventory_csv, load_transactions_csv
+from src.data_io import load_bundle
 from src.metrics import abc_classification, build_inventory_metrics, build_kpi_summary
 from src.recommendations import generate_recommendations
 
@@ -51,17 +49,51 @@ html, body, [class*="css"] {
 )
 
 
-@st.cache_data(show_spinner=False)
-def load_demo_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    root = Path(__file__).parent
-    with open(root / "data" / "inventory_demo.csv", "rb") as inv_f, open(root / "data" / "transactions_demo.csv", "rb") as tx_f:
-        return load_inventory_csv(inv_f), load_transactions_csv(tx_f)
+def enrich_metrics_with_tx_signals(metrics_df: pd.DataFrame, transactions_df: pd.DataFrame) -> pd.DataFrame:
+    """Attach transaction-derived fields without fabricating defaults."""
+    if metrics_df.empty:
+        return metrics_df.copy()
+
+    out = metrics_df.copy()
+    tx = transactions_df.copy()
+    tx["date"] = pd.to_datetime(tx["date"], errors="coerce")
+
+    receipt_delay = (
+        tx[tx["event_type"] == "receipt"]
+        .groupby(["sku", "warehouse"], as_index=False)["delay_days"]
+        .mean()
+        .rename(columns={"delay_days": "avg_delay_days"})
+    )
+    latest_tx = tx.groupby(["sku", "warehouse"], as_index=False)["date"].max().rename(columns={"date": "latest_tx_date"})
+
+    out = out.merge(receipt_delay, on=["sku", "warehouse"], how="left")
+    out = out.merge(latest_tx, on=["sku", "warehouse"], how="left")
+
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    out["latest_tx_date"] = pd.to_datetime(out["latest_tx_date"], errors="coerce")
+    out["data_lag_days"] = (out["date"] - out["latest_tx_date"]).dt.days
+    return out
 
 
-def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    if df is None or df.empty:
-        return b""
-    return df.to_csv(index=False).encode("utf-8")
+def build_issue_inventory_table(
+    metrics_df: pd.DataFrame,
+    language: str,
+    stockout_threshold: float,
+    overstock_doh: float,
+    delay_days: float,
+) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    for _, metric_row in metrics_df.iterrows():
+        issue_df = build_issue_breakdown(metric_row, language, stockout_threshold, overstock_doh, delay_days)
+        rows.append(issue_df)
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.concat(rows, ignore_index=True)
+    abs_col = "偏差绝对值" if language == "中文" else "absolute_gap"
+    if abs_col in out.columns:
+        out = out.sort_values(abs_col, ascending=False, na_position="last")
+    return out
 
 
 def render_calc_table(df: pd.DataFrame, key: str, language: str, col_help: dict[str, str] | None = None) -> None:
@@ -289,8 +321,7 @@ TXT = {
         "desc": "用于库存监控、风险归因、场景模拟和补货决策的可视化系统。",
         "panel": "控制面板",
         "source": "数据来源",
-        "demo": "使用内置演示数据",
-        "upload": "上传自定义 CSV",
+        "source_hint": "仅使用你上传的真实业务 CSV",
         "inv_csv": "库存快照 CSV",
         "tx_csv": "交易流水 CSV",
         "threshold": "阈值参数",
@@ -303,16 +334,9 @@ TXT = {
         "decision": "决策参数",
         "budget": "补货预算上限",
         "service": "目标服务水平",
-        "need_upload": "请先上传两份 CSV 文件。",
+        "need_upload": "请上传真实业务的两份 CSV 文件后再分析。",
         "load_fail": "数据加载失败",
-        "demo_ok": "演示数据已加载。",
         "formula": "问题清单与计算说明",
-        "demo_block": "演示数据与 CSV 格式参考",
-        "preview_inv": "库存演示数据预览",
-        "preview_tx": "交易演示数据预览",
-        "download_inv": "下载库存示例 CSV",
-        "download_tx": "下载交易示例 CSV",
-        "preview_plan": "计划值样例",
         "lineage": "数据来源与计算链路",
         "lineage_tip": "先看来源字段，再看差了多少，再看怎么算。",
         "metric_dict": "指标说明",
@@ -367,8 +391,7 @@ TXT = {
         "desc": "Visual system for inventory monitoring, risk attribution, simulation, and replenishment decisions.",
         "panel": "Control Panel",
         "source": "Data Source",
-        "demo": "Use built-in demo data",
-        "upload": "Upload custom CSV",
+        "source_hint": "Only use your uploaded real business CSVs",
         "inv_csv": "Inventory snapshot CSV",
         "tx_csv": "Transactions CSV",
         "threshold": "Threshold Settings",
@@ -381,16 +404,9 @@ TXT = {
         "decision": "Decision Settings",
         "budget": "Replenishment budget cap",
         "service": "Target service level",
-        "need_upload": "Please upload both CSV files.",
+        "need_upload": "Upload both real business CSV files before analysis.",
         "load_fail": "Data loading failed",
-        "demo_ok": "Demo data loaded.",
         "formula": "Issue List and Calculation Notes",
-        "demo_block": "Demo Data and CSV Format Reference",
-        "preview_inv": "Inventory demo preview",
-        "preview_tx": "Transactions demo preview",
-        "download_inv": "Download inventory sample CSV",
-        "download_tx": "Download transactions sample CSV",
-        "preview_plan": "Planned values sample",
         "lineage": "Data Source and Calculation Lineage",
         "lineage_tip": "Check source fields first, then the gap, then the calculation.",
         "metric_dict": "Metric Dictionary",
@@ -448,7 +464,8 @@ with st.sidebar:
     t = TXT[language]
 
     st.header(t["panel"])
-    source_mode = st.radio(t["source"], [t["demo"], t["upload"]], index=0)
+    st.subheader(t["source"])
+    st.caption(t["source_hint"])
 
     st.markdown("---")
     st.subheader(t["threshold"])
@@ -475,57 +492,21 @@ st.markdown(
 inventory_file = None
 transactions_file = None
 
-if source_mode == t["upload"]:
-    c_up_1, c_up_2 = st.columns(2)
-    with c_up_1:
-        inventory_file = st.file_uploader(t["inv_csv"], type=["csv"])
-    with c_up_2:
-        transactions_file = st.file_uploader(t["tx_csv"], type=["csv"])
+c_up_1, c_up_2 = st.columns(2)
+with c_up_1:
+    inventory_file = st.file_uploader(t["inv_csv"], type=["csv"])
+with c_up_2:
+    transactions_file = st.file_uploader(t["tx_csv"], type=["csv"])
 
-if source_mode == t["demo"]:
-    inventory_df, transactions_df = load_demo_data()
-    st.success(t["demo_ok"])
-else:
-    if not inventory_file or not transactions_file:
-        st.info(t["need_upload"])
-        st.stop()
-    try:
-        bundle = load_bundle(inventory_file, transactions_file)
-        inventory_df, transactions_df = bundle.inventory, bundle.transactions
-    except Exception as exc:
-        st.error(f"{t['load_fail']}: {exc}")
-        st.stop()
-
-with st.expander(t["demo_block"], expanded=False):
-    demo_inv, demo_tx = load_demo_data()
-    demo_plan = abc_classification(build_inventory_metrics(demo_inv))
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write(t["preview_inv"])
-        render_calc_table(demo_inv.head(10), key="demo_inv_table", language=language)
-        st.download_button(t["download_inv"], to_csv_bytes(demo_inv), "inventory_demo.csv", "text/csv")
-    with c2:
-        st.write(t["preview_tx"])
-        render_calc_table(demo_tx.head(10), key="demo_tx_table", language=language)
-        st.download_button(t["download_tx"], to_csv_bytes(demo_tx), "transactions_demo.csv", "text/csv")
-
-    st.write(t["preview_plan"])
-    render_calc_table(
-        demo_plan[[
-            "sku",
-            "warehouse",
-            "on_hand_qty",
-            "avg_daily_demand",
-            "lead_time_days",
-            "lead_time_demand",
-            "safety_stock",
-            "reorder_point",
-            "coverage_gap",
-            "abc_class",
-        ]].head(10),
-        key="demo_plan_table",
-        language=language,
-    )
+if not inventory_file or not transactions_file:
+    st.info(t["need_upload"])
+    st.stop()
+try:
+    bundle = load_bundle(inventory_file, transactions_file)
+    inventory_df, transactions_df = bundle.inventory, bundle.transactions
+except Exception as exc:
+    st.error(f"{t['load_fail']}: {exc}")
+    st.stop()
 
 st.caption("点图上的柱子、点、或按钮，就能看到它怎么计算出来。" if language == "中文" else "Click a bar, point, or button to see exactly how it is calculated.")
 
@@ -555,6 +536,7 @@ if filtered_metrics.empty:
 
 filtered_alerts = alerts_df[alerts_df["warehouse"].isin(selected_wh)] if not alerts_df.empty else alerts_df
 filtered_tx = transactions_df[transactions_df["warehouse"].isin(selected_wh)].copy()
+filtered_metrics_for_attr = enrich_metrics_with_tx_signals(filtered_metrics, filtered_tx)
 recs_df = generate_recommendations(filtered_metrics, language)
 filtered_recs = recs_df[recs_df["sku"].isin(filtered_metrics["sku"]) | (recs_df["sku"] == "ALL")]
 
@@ -613,29 +595,51 @@ with tab2:
     render_calc_table(filtered_alerts, key="alerts_table", language=language)
 
 with tab3:
-    st.caption("点开表格单元格，看原始值、阈值、差多少、怎么算。" if language == "中文" else "Click a table cell to see the raw value, threshold, gap, and calculation.")
+    st.caption(
+        "这里是全量 SKU 的真实偏差清单，点任意单元格即可看来源和计算说明。"
+        if language == "中文"
+        else "This is the full real-deviation list across SKUs. Click any cell to view source and calculation notes."
+    )
 
-    if filtered_metrics.empty:
+    if filtered_metrics_for_attr.empty:
         st.info("当前筛选下暂无可用归因数据。" if language == "中文" else "No attribution data under current filters.")
     else:
-        sku = st.selectbox(t["pick_sku"], sorted(filtered_metrics["sku"].unique().tolist()))
-        metric_row = filtered_metrics[filtered_metrics["sku"] == sku].iloc[0]
-        issue_df = build_issue_breakdown(metric_row, language, stockout_threshold, overstock_doh, delay_days)
+        issue_inventory_df = build_issue_inventory_table(
+            metrics_df=filtered_metrics_for_attr,
+            language=language,
+            stockout_threshold=stockout_threshold,
+            overstock_doh=overstock_doh,
+            delay_days=delay_days,
+        )
 
-        st.markdown("#### " + ("先看问题，再看怎么算" if language == "中文" else "See the issue first, then the calculation"))
-        st.caption("这里不做打分，只列出哪里有问题、差多少、怎么来的。" if language == "中文" else "No score here. Only the issue, the gap, and the calculation.")
+        st.markdown("#### " + ("真实业务偏差清单" if language == "中文" else "Real Business Deviation Inventory"))
+        st.caption(
+            "不做因子分和域分，不做归一化比较，只保留原始值、阈值和偏差量。"
+            if language == "中文"
+            else "No factor/domain scores and no normalized comparison. Only raw values, thresholds, and deviation amounts."
+        )
 
-        render_calc_table(issue_df, key="sku_issue_detail_table", language=language)
+        render_calc_table(issue_inventory_df, key="all_issue_inventory_table", language=language)
 
-        if not issue_df.empty:
-            main_issue = issue_df.iloc[0]
+        if not issue_inventory_df.empty:
+            main_issue = issue_inventory_df.iloc[0]
+            if language == "中文":
+                card_rows = [
+                    {"SKU": main_issue.get("sku", ""), "仓库": main_issue.get("warehouse", ""), "问题": main_issue.get("问题", "")},
+                    {"当前值": main_issue.get("当前值", ""), "阈值/基准": main_issue.get("阈值/基准", ""), "差了多少": main_issue.get("差了多少", "")},
+                    {"是否超阈值": main_issue.get("是否超阈值", ""), "怎么算": main_issue.get("怎么算", "")},
+                    {"建议看什么": main_issue.get("建议看什么", "")},
+                ]
+            else:
+                card_rows = [
+                    {"SKU": main_issue.get("sku", ""), "warehouse": main_issue.get("warehouse", ""), "issue": main_issue.get("issue", "")},
+                    {"current": main_issue.get("current", ""), "baseline": main_issue.get("baseline", ""), "gap": main_issue.get("gap", "")},
+                    {"out_of_bound": main_issue.get("out_of_bound", ""), "how": main_issue.get("how", "")},
+                    {"what_to_check": main_issue.get("what_to_check", "")},
+                ]
             render_selected_card(
                 "已选问题" if language == "中文" else "Selected issue",
-                [
-                    {"问题": main_issue.iloc[0], "当前值": main_issue.iloc[2]},
-                    {"差了多少": main_issue.iloc[3], "怎么算": main_issue.iloc[4]},
-                    {"建议看什么": main_issue.iloc[5]},
-                ],
+                card_rows,
                 language,
             )
 
