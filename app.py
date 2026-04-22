@@ -8,6 +8,7 @@ import plotly.express as px
 import streamlit as st
 
 from src.alerts import AlertConfig, detect_alerts
+from src.attribution import build_domain_detail_table, build_factor_detail_table
 from src.data_io import load_bundle, load_inventory_csv, load_transactions_csv
 from src.metrics import abc_classification, build_inventory_metrics, build_kpi_summary
 from src.recommendations import generate_recommendations
@@ -299,78 +300,6 @@ def build_factor_summary(granular_df: pd.DataFrame, language: str) -> pd.DataFra
     return out
 
 
-def build_logic_tables(
-    filtered_metrics: pd.DataFrame,
-    filtered_tx: pd.DataFrame,
-    kpis: dict,
-    language: str,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    if language == "中文":
-        source_df = pd.DataFrame(
-            [
-                {"数字": "库存总价值", "来自文件": "inventory.csv", "核心字段": "on_hand_qty, unit_cost", "说明": "库存快照中的在手库存和单价"},
-                {"数字": "缺货风险SKU数", "来自文件": "inventory.csv", "核心字段": "coverage_gap", "说明": "先算 coverage_gap，再按阈值判断"},
-                {"数字": "超储风险SKU数", "来自文件": "inventory.csv", "核心字段": "doh", "说明": "先算库存覆盖天数，再按阈值判断"},
-                {"数字": "周转率代理", "来自文件": "transactions.csv + inventory.csv", "核心字段": "sale qty, on_hand_qty", "说明": "销售量来自交易流水，平均库存来自库存快照"},
-                {"数字": "服务水平代理", "来自文件": "inventory.csv", "核心字段": "coverage_gap", "说明": "coverage_gap >= 0 的 SKU 占比"},
-            ]
-        )
-        formula_df = pd.DataFrame(
-            [
-                {"指标": "DOH", "公式": "on_hand_qty / avg_daily_demand", "输入字段": "on_hand_qty, avg_daily_demand"},
-                {"指标": "lead_time_demand", "公式": "avg_daily_demand * lead_time_days", "输入字段": "avg_daily_demand, lead_time_days"},
-                {"指标": "safety_stock", "公式": "1.65 * std(avg_daily_demand) * sqrt(lead_time_days)", "输入字段": "avg_daily_demand, lead_time_days"},
-                {"指标": "reorder_point", "公式": "lead_time_demand + safety_stock", "输入字段": "lead_time_demand, safety_stock"},
-                {"指标": "coverage_gap", "公式": "on_hand_qty - reorder_point", "输入字段": "on_hand_qty, reorder_point"},
-                {"指标": "库存总价值", "公式": "sum(on_hand_qty * unit_cost)", "输入字段": "on_hand_qty, unit_cost"},
-                {"指标": "周转率代理", "公式": "sum(sale_qty) / mean(on_hand_qty)", "输入字段": "transactions.qty, on_hand_qty"},
-                {"指标": "服务水平代理", "公式": "count(coverage_gap>=0) / count(SKU)", "输入字段": "coverage_gap"},
-            ]
-        )
-        kpi_detail_df = pd.DataFrame(
-            [
-                {"KPI": "库存总价值", "当前值": f"${kpis['total_inventory_value']:,.0f}", "计算展开": "sum(on_hand_qty * unit_cost)", "样本量": f"SKU={len(filtered_metrics)}"},
-                {"KPI": "缺货风险SKU数", "当前值": int(kpis["stockout_risk_sku_count"]), "计算展开": "count(coverage_gap < stockout_threshold)", "样本量": f"SKU={len(filtered_metrics)}"},
-                {"KPI": "超储风险SKU数", "当前值": int(kpis["overstock_risk_sku_count"]), "计算展开": "count(doh > overstock_doh_threshold)", "样本量": f"SKU={len(filtered_metrics)}"},
-                {"KPI": "周转率代理", "当前值": f"{kpis['inventory_turnover_proxy']:.2f}", "计算展开": "sum(sale_qty) / mean(on_hand_qty)", "样本量": f"交易行={len(filtered_tx)}"},
-                {"KPI": "服务水平代理", "当前值": f"{kpis['service_level_proxy']:.1%}", "计算展开": "count(coverage_gap>=0) / count(SKU)", "样本量": f"SKU={len(filtered_metrics)}"},
-            ]
-        )
-    else:
-        source_df = pd.DataFrame(
-            [
-                {"number": "Total Inventory Value", "source_file": "inventory.csv", "key_fields": "on_hand_qty, unit_cost", "note": "On-hand stock and unit cost from inventory snapshot"},
-                {"number": "Stockout Risk SKU", "source_file": "inventory.csv", "key_fields": "coverage_gap", "note": "Compute coverage_gap first, then apply threshold"},
-                {"number": "Overstock Risk SKU", "source_file": "inventory.csv", "key_fields": "doh", "note": "Compute DOI first, then apply threshold"},
-                {"number": "Turnover Proxy", "source_file": "transactions.csv + inventory.csv", "key_fields": "sale qty, on_hand_qty", "note": "Sales from transactions, average stock from inventory"},
-                {"number": "Service Level Proxy", "source_file": "inventory.csv", "key_fields": "coverage_gap", "note": "Share of SKUs with coverage_gap >= 0"},
-            ]
-        )
-        formula_df = pd.DataFrame(
-            [
-                {"metric": "DOH", "formula": "on_hand_qty / avg_daily_demand", "inputs": "on_hand_qty, avg_daily_demand"},
-                {"metric": "lead_time_demand", "formula": "avg_daily_demand * lead_time_days", "inputs": "avg_daily_demand, lead_time_days"},
-                {"metric": "safety_stock", "formula": "1.65 * std(avg_daily_demand) * sqrt(lead_time_days)", "inputs": "avg_daily_demand, lead_time_days"},
-                {"metric": "reorder_point", "formula": "lead_time_demand + safety_stock", "inputs": "lead_time_demand, safety_stock"},
-                {"metric": "coverage_gap", "formula": "on_hand_qty - reorder_point", "inputs": "on_hand_qty, reorder_point"},
-                {"metric": "Total Inventory Value", "formula": "sum(on_hand_qty * unit_cost)", "inputs": "on_hand_qty, unit_cost"},
-                {"metric": "Turnover Proxy", "formula": "sum(sale_qty) / mean(on_hand_qty)", "inputs": "transactions.qty, on_hand_qty"},
-                {"metric": "Service Level Proxy", "formula": "count(coverage_gap>=0) / count(SKU)", "inputs": "coverage_gap"},
-            ]
-        )
-        kpi_detail_df = pd.DataFrame(
-            [
-                {"KPI": "Total Inventory Value", "value": f"${kpis['total_inventory_value']:,.0f}", "calculation": "sum(on_hand_qty * unit_cost)", "sample_size": f"SKU={len(filtered_metrics)}"},
-                {"KPI": "Stockout Risk SKU", "value": int(kpis["stockout_risk_sku_count"]), "calculation": "count(coverage_gap < stockout_threshold)", "sample_size": f"SKU={len(filtered_metrics)}"},
-                {"KPI": "Overstock Risk SKU", "value": int(kpis["overstock_risk_sku_count"]), "calculation": "count(doh > overstock_doh_threshold)", "sample_size": f"SKU={len(filtered_metrics)}"},
-                {"KPI": "Turnover Proxy", "value": f"{kpis['inventory_turnover_proxy']:.2f}", "calculation": "sum(sale_qty) / mean(on_hand_qty)", "sample_size": f"TxRows={len(filtered_tx)}"},
-                {"KPI": "Service Level Proxy", "value": f"{kpis['service_level_proxy']:.1%}", "calculation": "count(coverage_gap>=0) / count(SKU)", "sample_size": f"SKU={len(filtered_metrics)}"},
-            ]
-        )
-
-    return source_df, formula_df, kpi_detail_df
-
-
 def build_kpi_formula_chains(
     filtered_metrics: pd.DataFrame,
     filtered_tx: pd.DataFrame,
@@ -486,6 +415,40 @@ def render_formula_button_table(label: str, table_df: pd.DataFrame, key: str, la
             _render_chain_card(table_df)
 
 
+def render_selected_card(title: str, rows: list[dict[str, object]], language: str) -> None:
+    body_lines = []
+    for row in rows:
+        parts = [f"{k}: {v}" for k, v in row.items()]
+        body_lines.append(" | ".join(parts))
+    body = "<br/>".join(body_lines) if body_lines else ("无数据" if language == "中文" else "No data")
+    st.markdown(
+        f"""
+<div class=\"cell-card\">
+  <b>{title}</b><br/>
+  {body}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def get_selected_point(state) -> dict[str, object] | None:
+    if state is None or not hasattr(state, "selection"):
+        return None
+    points = state.selection.get("points", [])
+    return points[0] if points else None
+
+
+def _selected_point_value(point: dict[str, object], fallback_key: str = "x") -> object:
+    if fallback_key in point:
+        return point[fallback_key]
+    if "label" in point:
+        return point["label"]
+    if "customdata" in point:
+        return point["customdata"]
+    return None
+
+
 TXT = {
     "中文": {
         "lang_picker": "界面语言",
@@ -560,15 +523,8 @@ TXT = {
         "no_data": "筛选后无数据，请调整筛选条件。",
         "wh_filter": "按仓库筛选",
         "cat_filter": "按品类筛选",
-        "logic_title": "数字从哪里来（信息源与计算逻辑）",
-        "logic_caption": "这一区只做一件事：把每个核心数字的来源和计算方式写清楚。",
-        "logic_sources": "1) 信息源总表",
-        "logic_formulas": "2) 指标公式总表",
-        "logic_values": "3) 当前筛选下 KPI 计算展开",
         "kpi_formula_btn": "查看公式链路",
         "kpi_formula_title": "KPI 按钮版公式解释",
-        "all_formula_title": "全量指标按钮解释",
-        "all_formula_tip": "点击任意指标按钮，直接查看公式链路。",
         "domain_formula_btn": "域分公式",
         "sim_formula_btn": "模拟公式",
     },
@@ -645,15 +601,8 @@ TXT = {
         "no_data": "No data after filtering. Adjust your filters.",
         "wh_filter": "Filter by warehouse",
         "cat_filter": "Filter by category",
-        "logic_title": "Where Numbers Come From",
-        "logic_caption": "This section only does one thing: explain source and formula for each key number.",
-        "logic_sources": "1) Source Dictionary",
-        "logic_formulas": "2) Formula Dictionary",
-        "logic_values": "3) KPI Breakdown Under Current Filters",
         "kpi_formula_btn": "View Formula Chain",
         "kpi_formula_title": "KPI Formula Buttons",
-        "all_formula_title": "All Metric Formula Buttons",
-        "all_formula_tip": "Click any metric button to view its formula chain.",
         "domain_formula_btn": "Domain Formula",
         "sim_formula_btn": "Simulation Formula",
     },
@@ -745,115 +694,7 @@ with st.expander(t["demo_block"], expanded=False):
         language=language,
     )
 
-with st.expander(t["formula"], expanded=False):
-    if language == "中文":
-        st.markdown(
-            """
-### 1) 基础库存指标
-
-- 库存覆盖天数 = 当前库存数量 / 日均需求数量
-- 交期需求量 = 日均需求数量 × 补货交期天数
-- 安全库存 = z × 需求标准差 × sqrt(补货交期天数)
-- 再订货点 = 交期需求量 + 安全库存
-
-### 2) 细粒度因子评分（0-1）
-
-- 需求侧：预测不准分 = |实际需求 - 预测需求| / 预测需求，再归一化到 0-1
-- 供应侧：供应商延迟分 = 平均延迟天 / 7，再归一化到 0-1
-- 仓储侧：ROP 设置分 = |Gap| / 再订货点，再归一化到 0-1
-- 流程侧：信息同步分 = 信息同步延迟天 / 5，再归一化到 0-1
-
-### 3) 域评分与总评分
-
-- 域评分 = 该域全部因子分的平均值
-- 总评分 = 四大域全部因子分的平均值
-"""
-        )
-    else:
-        st.markdown(
-            """
-### 1) Base Inventory Metrics
-
-- Days of Inventory = On-hand Quantity / Average Daily Demand
-- Lead-time Demand = Average Daily Demand × Lead-time Days
-- Safety Stock = z × demand std × sqrt(lead-time days)
-- Reorder Point = Lead-time Demand + Safety Stock
-
-### 2) Granular Factor Scoring (0-1)
-
-- Demand: forecast error = |actual - forecast| / forecast, normalized to 0-1
-- Supply: supplier delay = avg_delay_days / 7, normalized to 0-1
-- Warehouse: ROP setting = |Gap| / reorder_point, normalized to 0-1
-- Process: info sync = info_sync_delay_days / 5, normalized to 0-1
-
-### 3) Domain and Overall Scores
-
-- Domain score = mean of all factors in the domain
-- Overall score = mean of all factors across four domains
-"""
-        )
-
-with st.expander(t["lineage"], expanded=False):
-    st.caption(t["lineage_tip"])
-    if language == "中文":
-        st.markdown(
-            """
-| 步骤 | 输入来源 | 输出字段 | 说明 |
-|---|---|---|---|
-| 库存基础数据 | inventory.csv | on_hand_qty, avg_daily_demand, lead_time_days, unit_cost | 原始库存和需求数据 |
-| 交易数据 | transactions.csv | event_type, qty, delay_days | 销售/入库/延迟信息 |
-| 计划值计算 | 库存基础数据 | lead_time_demand, safety_stock, reorder_point | 形成计划值 |
-| 细粒度因子计算 | 实际值 + 计划值 + 交易行为 | 需求/供应/仓储/流程因子分 | 每个因子归一化到 0-1 |
-| 风险评分聚合 | 各因子分 | domain_score 与 overall_score | 域均值与总均值 |
-"""
-        )
-    else:
-        st.markdown(
-            """
-| Step | Source Input | Output Fields | Description |
-|---|---|---|---|
-| Inventory base | inventory.csv | on_hand_qty, avg_daily_demand, lead_time_days, unit_cost | Raw stock and demand data |
-| Transactions | transactions.csv | event_type, qty, delay_days | Sales/receipt/delay events |
-| Planned value | Inventory base | lead_time_demand, safety_stock, reorder_point | Planned values |
-| Granular factor calculation | Actual + planned + transaction behavior | demand/supply/warehouse/process factor scores | Each factor is normalized to 0-1 |
-| Risk aggregation | Factor scores | domain_score and overall_score | Domain mean and overall mean |
-"""
-        )
-
-with st.expander(t["metric_dict"], expanded=False):
-    if language == "中文":
-        st.markdown(
-            """
-- 库存总价值：on_hand_qty * unit_cost
-- 缺货风险：coverage_gap < 阈值
-- 超储风险：库存覆盖天数 > 阈值
-- 周转率代理：销售总量 / 平均库存数量
-- 服务水平代理：coverage_gap >= 0 的 SKU 占比
-- 需求域评分：需求侧因子均值
-- 供应域评分：供应侧因子均值
-- 仓储域评分：仓储侧因子均值
-- 流程域评分：流程侧因子均值
-- 总评分：四大域全部因子均值
-- ABC：按库存价值降序，累计占比 <=80% 为 A，80%-95% 为 B，其余为 C
-"""
-        )
-    else:
-        st.markdown(
-            """
-- Total inventory value: on_hand_qty * unit_cost
-- Stockout risk: coverage_gap < threshold
-- Overstock risk: days_of_inventory > threshold
-- Turnover proxy: total_sales_qty / average_inventory_qty
-- Service-level proxy: share of SKUs where coverage_gap >= 0
-- Demand domain score: mean of demand factors
-- Supply domain score: mean of supply factors
-- Warehouse domain score: mean of warehouse factors
-- Process domain score: mean of process factors
-- Overall score: mean of all factors across four domains
-- ABC: cumulative value <=80% A, 80%-95% B, >95% C
-"""
-        )
-    st.info(t["abc_rule"])
+st.caption("点图上的柱子、点、或按钮，就能看到它怎么计算出来。" if language == "中文" else "Click a bar, point, or button to see exactly how it is calculated.")
 
 metrics_df = abc_classification(build_inventory_metrics(inventory_df))
 alerts_df = detect_alerts(
@@ -913,51 +754,8 @@ with k5:
     st.metric(t["kpi_svc"], f"{kpis['service_level_proxy']:.1%}")
     render_formula_button_table(t["kpi_formula_btn"], kpi_formula_chains["kpi_svc"], key="kpi_svc_formula", language=language)
 
-source_dict_df, formula_dict_df, kpi_breakdown_df = build_logic_tables(
-    filtered_metrics=filtered_metrics,
-    filtered_tx=filtered_tx,
-    kpis=kpis,
-    language=language,
-)
-
-with st.expander(t["logic_title"], expanded=True):
-    st.caption(t["logic_caption"])
-    st.markdown(f"**{t['logic_sources']}**")
-    render_calc_table(source_dict_df, key="logic_sources_table", language=language)
-    st.markdown(f"**{t['logic_formulas']}**")
-    render_calc_table(formula_dict_df, key="logic_formula_table", language=language)
-    st.markdown(f"**{t['logic_values']}**")
-    render_calc_table(kpi_breakdown_df, key="logic_kpi_breakdown_table", language=language)
-    st.markdown(f"**{t['kpi_formula_title']}**")
-    kf1, kf2, kf3, kf4, kf5 = st.columns(5)
-    with kf1:
-        render_formula_button_table(t["kpi_value"], kpi_formula_chains["kpi_value"], key="logic_btn_kpi_value", language=language)
-    with kf2:
-        render_formula_button_table(t["kpi_so"], kpi_formula_chains["kpi_so"], key="logic_btn_kpi_so", language=language)
-    with kf3:
-        render_formula_button_table(t["kpi_os"], kpi_formula_chains["kpi_os"], key="logic_btn_kpi_os", language=language)
-    with kf4:
-        render_formula_button_table(t["kpi_turn"], kpi_formula_chains["kpi_turn"], key="logic_btn_kpi_turn", language=language)
-    with kf5:
-        render_formula_button_table(t["kpi_svc"], kpi_formula_chains["kpi_svc"], key="logic_btn_kpi_svc", language=language)
-
-    st.markdown(f"**{t['all_formula_title']}**")
-    st.caption(t["all_formula_tip"])
-    metric_name_col = "指标" if language == "中文" else "metric"
-    formula_col = "公式" if language == "中文" else "formula"
-    input_col = "输入字段" if language == "中文" else "inputs"
-    for i, row in formula_dict_df.iterrows():
-        metric_label = str(row[metric_name_col])
-        metric_table = pd.DataFrame(
-            [
-                {
-                    ("步骤" if language == "中文" else "step"): "定义" if language == "中文" else "definition",
-                    ("表达式" if language == "中文" else "expression"): row[formula_col],
-                    ("字段" if language == "中文" else "fields"): row[input_col],
-                }
-            ]
-        )
-        render_formula_button_table(metric_label, metric_table, key=f"logic_metric_formula_{i}", language=language)
+st.markdown("### " + ("点图看计算" if language == "中文" else "Click the chart to see the calculation"))
+st.caption("图上的柱子或点，会直接展开底层公式链路。" if language == "中文" else "Click any bar or point on the charts to expand the underlying formula chain.")
 
 tab1, tab2, tab3, tab4 = st.tabs([t["tab1"], t["tab2"], t["tab3"], t["tab4"]])
 
@@ -984,147 +782,98 @@ with tab2:
     render_calc_table(filtered_alerts, key="alerts_table", language=language)
 
 with tab3:
-    st.caption(t["diag_tip"])
-    st.info(t["delta_explain"])
-    st.caption(t["cell_tip"])
+    st.caption("点四大域图和因子图，直接看公式链路和影响量化。" if language == "中文" else "Click the domain and factor charts to see formula chains and quantified impact.")
 
     if granular_df.empty:
         st.info("当前筛选下暂无可用归因数据。" if language == "中文" else "No attribution data under current filters.")
     else:
         sku = st.selectbox(t["pick_sku"], sorted(granular_df["sku"].unique().tolist()))
         g = granular_df[granular_df["sku"] == sku].iloc[0]
+        domain_detail_df = build_domain_detail_table(g, language)
+        factor_detail_df = build_factor_detail_table(g, language)
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("需求域" if language == "中文" else "Demand", f"{float(g['demand_domain_score']):.2f}")
-        c2.metric("供应域" if language == "中文" else "Supply", f"{float(g['supply_domain_score']):.2f}")
-        c3.metric("仓储域" if language == "中文" else "Warehouse", f"{float(g['warehouse_domain_score']):.2f}")
-        c4.metric("流程域" if language == "中文" else "Process", f"{float(g['process_domain_score']):.2f}")
-        with c1:
-            render_formula_button_table(
-                t["domain_formula_btn"],
-                pd.DataFrame([
-                    {("步骤" if language == "中文" else "step"): ("定义" if language == "中文" else "definition"),
-                     ("表达式" if language == "中文" else "expression"): ("需求域分 = 需求侧因子均值" if language == "中文" else "demand_domain_score = mean(demand factors)"),
-                     ("结果" if language == "中文" else "result"): f"{float(g['demand_domain_score']):.2f}"}
-                ]),
-                key="domain_formula_demand",
-                language=language,
-            )
-        with c2:
-            render_formula_button_table(
-                t["domain_formula_btn"],
-                pd.DataFrame([
-                    {("步骤" if language == "中文" else "step"): ("定义" if language == "中文" else "definition"),
-                     ("表达式" if language == "中文" else "expression"): ("供应域分 = 供应侧因子均值" if language == "中文" else "supply_domain_score = mean(supply factors)"),
-                     ("结果" if language == "中文" else "result"): f"{float(g['supply_domain_score']):.2f}"}
-                ]),
-                key="domain_formula_supply",
-                language=language,
-            )
-        with c3:
-            render_formula_button_table(
-                t["domain_formula_btn"],
-                pd.DataFrame([
-                    {("步骤" if language == "中文" else "step"): ("定义" if language == "中文" else "definition"),
-                     ("表达式" if language == "中文" else "expression"): ("仓储域分 = 仓储侧因子均值" if language == "中文" else "warehouse_domain_score = mean(warehouse factors)"),
-                     ("结果" if language == "中文" else "result"): f"{float(g['warehouse_domain_score']):.2f}"}
-                ]),
-                key="domain_formula_warehouse",
-                language=language,
-            )
-        with c4:
-            render_formula_button_table(
-                t["domain_formula_btn"],
-                pd.DataFrame([
-                    {("步骤" if language == "中文" else "step"): ("定义" if language == "中文" else "definition"),
-                     ("表达式" if language == "中文" else "expression"): ("流程域分 = 流程侧因子均值" if language == "中文" else "process_domain_score = mean(process factors)"),
-                     ("结果" if language == "中文" else "result"): f"{float(g['process_domain_score']):.2f}"}
-                ]),
-                key="domain_formula_process",
-                language=language,
-            )
+        st.markdown("#### " + ("一眼看懂：先点域，再点因子" if language == "中文" else "Understand in one glance: click a domain, then click a factor"))
+        st.caption("域图看大方向，因子图看具体怎么算；点柱子后直接展开公式卡片。" if language == "中文" else "The domain chart shows the broad reason; the factor chart shows the exact formula. Click a bar to open the detail card.")
 
-        domain_scores = pd.DataFrame(
-            [
-                {"domain": "需求" if language == "中文" else "demand", "score": float(g["demand_domain_score"])},
-                {"domain": "供应" if language == "中文" else "supply", "score": float(g["supply_domain_score"])},
-                {"domain": "仓储" if language == "中文" else "warehouse", "score": float(g["warehouse_domain_score"])},
-                {"domain": "流程" if language == "中文" else "process", "score": float(g["process_domain_score"])},
-            ]
+        domain_fig = px.bar(
+            domain_detail_df,
+            x="domain",
+            y="score",
+            title=t["domain_scores"],
+            custom_data=["impact_points", "formula"],
         )
-        st.subheader(t["domain_overview"])
-        st.plotly_chart(px.bar(domain_scores, x="domain", y="score", title=t["domain_scores"]), use_container_width=True)
-        render_calc_table(domain_scores, key="domain_scores_table", language=language, col_help={"score": "域内因子均值" if language == "中文" else "Mean of factors in this domain"})
-
-        factor_rows = []
-        for c in _factor_cols(granular_df):
-            factor_rows.append({
-                t["factor_col"]: c if language == "中文" else _en_factor_name(c),
-                t["score_col"]: float(g[c]),
-            })
-        factor_table = pd.DataFrame(factor_rows).sort_values(t["score_col"], ascending=False)
-
-        st.subheader(t["top_factors"])
-        st.plotly_chart(px.bar(factor_table.head(10), x=t["factor_col"], y=t["score_col"], title=t["top_factors"]), use_container_width=True)
-        render_calc_table(
-            factor_table,
-            key="factor_table",
-            language=language,
-            col_help={
-                t["score_col"]: "因子归一化风险分，范围 0-1。" if language == "中文" else "Normalized factor score in range 0-1.",
-            },
-        )
-
-        with st.expander(t["trace"], expanded=False):
-            m = filtered_metrics[filtered_metrics["sku"] == sku].iloc[0]
-            trace_rows = pd.DataFrame(
+        domain_fig.update_traces(marker_color="#0b74de")
+        domain_state = st.plotly_chart(domain_fig, use_container_width=True, key="domain_detail_chart", on_select="rerun", selection_mode=("points",))
+        selected_domain_point = get_selected_point(domain_state)
+        selected_domain = _selected_point_value(selected_domain_point, "x") if selected_domain_point else None
+        if selected_domain is not None:
+            domain_row = domain_detail_df[domain_detail_df["domain"] == selected_domain].iloc[0]
+            render_selected_card(
+                ("已选域" if language == "中文" else "Selected domain"),
                 [
-                    {
-                        "metric": "交期需求量" if language == "中文" else "lead_time_demand",
-                        "input": f"avg_daily_demand={m['avg_daily_demand']:.2f}, lead_time_days={m['lead_time_days']:.2f}",
-                        "formula": "avg_daily_demand * lead_time_days",
-                        "result": float(m["lead_time_demand"]),
-                    },
-                    {
-                        "metric": "安全库存" if language == "中文" else "safety_stock",
-                        "input": f"z=1.65, demand_std(global), lead_time_days={m['lead_time_days']:.2f}",
-                        "formula": "z * std(demand) * sqrt(lead_time_days)",
-                        "result": float(m["safety_stock"]),
-                    },
-                    {
-                        "metric": "再订货点" if language == "中文" else "reorder_point",
-                        "input": f"lead_time_demand={m['lead_time_demand']:.2f}, safety_stock={m['safety_stock']:.2f}",
-                        "formula": "lead_time_demand + safety_stock",
-                        "result": float(m["reorder_point"]),
-                    },
-                    {
-                        "metric": "Gap",
-                        "input": f"on_hand_qty={m['on_hand_qty']:.2f}, reorder_point={m['reorder_point']:.2f}",
-                        "formula": "on_hand_qty - reorder_point",
-                        "result": float(m["coverage_gap"]),
-                    },
-                ]
+                    {"域": domain_row["domain"] if language == "中文" else domain_row["domain"], "分数": f"{domain_row['score']:.4f}"},
+                    {"影响点数": f"{domain_row['impact_points']:.4f}", "公式": domain_row["formula"], "说明": f"域分 = 该域全部因子均值" if language == "中文" else "domain score = mean of factors in this domain"},
+                ],
+                language,
             )
-            st.subheader(t["trace_table"])
-            render_calc_table(trace_rows, key="trace_table", language=language)
+
+        factor_view = factor_detail_df.copy()
+        if selected_domain is not None:
+            factor_view = factor_view[factor_view["domain"] == str(selected_domain)]
+        if factor_view.empty:
+            factor_view = factor_detail_df
+
+        factor_fig = px.bar(
+            factor_view,
+            x="factor",
+            y="score",
+            title=t["top_factors"],
+            custom_data=["raw", "formula", "impact_points", "impact_pct", "note", "domain"],
+        )
+        factor_fig.update_traces(marker_color="#18a999")
+        factor_state = st.plotly_chart(factor_fig, use_container_width=True, key="factor_detail_chart", on_select="rerun", selection_mode=("points",))
+        selected_factor_point = get_selected_point(factor_state)
+        selected_factor = _selected_point_value(selected_factor_point, "x") if selected_factor_point else None
+        if selected_factor is not None:
+            factor_row = factor_view[factor_view["factor"] == selected_factor].iloc[0]
+            render_selected_card(
+                ("已选因子" if language == "中文" else "Selected factor"),
+                [
+                    {"因子": factor_row["factor"], "域": factor_row["domain"], "原始输入": factor_row["raw"]},
+                    {"公式": factor_row["formula"], "归一化分": f"{factor_row['score']:.4f}"},
+                    {"对总分影响点数": f"{factor_row['impact_points']:.4f}", "影响占比": f"{factor_row['impact_pct']:.1%}", "说明": factor_row["note"]},
+                ],
+                language,
+            )
 
         st.subheader(t["granular_in_attr"])
-        granular_cols = [
-            "sku",
-            "warehouse",
-            "overall_score",
-            "overall_level",
-            "demand_domain_score",
-            "supply_domain_score",
-            "warehouse_domain_score",
-            "process_domain_score",
-        ] + _factor_cols(granular_df)
-        sku_granular = granular_df[granular_df["sku"] == sku][granular_cols].copy()
         if language == "English":
-            sku_granular = sku_granular.rename(columns={c: _en_factor_name(c) for c in _factor_cols(granular_df)})
-
-        st.caption(t["granular_pick"])
-        render_calc_table(sku_granular, key="sku_granular_table", language=language)
+            display_factor_df = factor_detail_df.rename(
+                columns={
+                    "factor": "factor",
+                    "domain": "domain",
+                    "raw": "raw",
+                    "formula": "formula",
+                    "score": "score",
+                    "impact_points": "impact_points",
+                    "impact_pct": "impact_pct",
+                    "note": "note",
+                }
+            )
+        else:
+            display_factor_df = factor_detail_df.rename(
+                columns={
+                    "factor": "因子",
+                    "domain": "域",
+                    "raw": "原始输入",
+                    "formula": "公式",
+                    "score": "归一化分",
+                    "impact_points": "对总分影响点数",
+                    "impact_pct": "影响占比",
+                    "note": "说明",
+                }
+            )
+        render_calc_table(display_factor_df, key="sku_factor_detail_table", language=language)
 
 with tab4:
     st.subheader(t["recs"])
