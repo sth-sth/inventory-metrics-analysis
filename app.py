@@ -8,7 +8,6 @@ import plotly.express as px
 import streamlit as st
 
 from src.alerts import AlertConfig, detect_alerts
-from src.attribution import attribution_step_breakdown, root_cause_attribution
 from src.data_io import load_bundle, load_inventory_csv, load_transactions_csv
 from src.metrics import abc_classification, build_inventory_metrics, build_kpi_summary
 from src.recommendations import generate_recommendations
@@ -37,6 +36,14 @@ html, body, [class*="css"] {
     color: #fff;
     margin-bottom: 16px;
 }
+.cell-card {
+    border: 1px solid rgba(14,165,164,0.35);
+    background: rgba(255,255,255,0.92);
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin-top: 8px;
+    box-shadow: 0 6px 20px rgba(15,39,64,0.10);
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -64,6 +71,85 @@ def level_text(score: float, language: str) -> str:
     return "低" if language == "中文" else "Low"
 
 
+def _factor_cols(df: pd.DataFrame) -> list[str]:
+    return [
+        c
+        for c in df.columns
+        if c.startswith("需求侧_") or c.startswith("供应侧_") or c.startswith("仓储侧_") or c.startswith("流程侧_")
+    ]
+
+
+def _en_factor_name(name: str) -> str:
+    mapping = {
+        "需求侧_预测不准": "demand_forecast_error",
+        "需求侧_历史不足": "demand_insufficient_history",
+        "需求侧_季节波动": "demand_seasonality",
+        "需求侧_促销冲击": "demand_promotion_shock",
+        "需求侧_突变风险": "demand_market_shift",
+        "供应侧_供应商延迟": "supply_supplier_delay",
+        "供应侧_交付不稳": "supply_delivery_instability",
+        "供应侧_MOQ约束": "supply_moq_pressure",
+        "供应侧_运输阻塞": "supply_transport_block",
+        "仓储侧_安全库存设置": "warehouse_safety_stock_setting",
+        "仓储侧_ROP设置": "warehouse_rop_setting",
+        "仓储侧_阈值静态": "warehouse_static_threshold",
+        "仓储侧_交期假设": "warehouse_leadtime_assumption",
+        "流程侧_盘点规范": "process_cycle_counting",
+        "流程侧_信息同步": "process_info_sync",
+        "流程侧_审批速度": "process_approval_speed",
+        "流程侧_数据滞后": "process_data_latency",
+    }
+    return mapping.get(name, name)
+
+
+def render_calc_table(df: pd.DataFrame, key: str, language: str, col_help: dict[str, str] | None = None) -> None:
+    event = None
+    try:
+        event = st.dataframe(df, use_container_width=True, on_select="rerun", selection_mode="single-cell", key=key)
+    except TypeError:
+        st.dataframe(df, use_container_width=True)
+        st.caption("当前版本不支持单元格点击详情。" if language == "中文" else "Current version does not support cell-click details.")
+        return
+
+    if event is None or not hasattr(event, "selection"):
+        return
+    cells = event.selection.get("cells", [])
+    if not cells:
+        return
+
+    cell = cells[0]
+    row_idx = int(cell.get("row", 0))
+    col_ref = cell.get("column")
+    if isinstance(col_ref, int):
+        if col_ref < 0 or col_ref >= len(df.columns):
+            return
+        col_name = str(df.columns[col_ref])
+    else:
+        col_name = str(col_ref)
+        if col_name not in df.columns:
+            return
+
+    value = df.iloc[row_idx][col_name]
+    row_label = f"第 {row_idx + 1} 行" if language == "中文" else f"Row {row_idx + 1}"
+    col_label = "列" if language == "中文" else "Column"
+    val_label = "值" if language == "中文" else "Value"
+    explain_label = "说明" if language == "中文" else "Explanation"
+    default_note = "该单元格为当前计算结果。" if language == "中文" else "This cell is a current computed result."
+    note = (col_help or {}).get(col_name, default_note)
+
+    st.markdown(
+        f"""
+<div class=\"cell-card\">
+  <b>{row_label}</b><br/>
+  {col_label}: {col_name}<br/>
+  {val_label}: {value}<br/>
+  {explain_label}: {note}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 def build_granular_diagnosis(metrics_df: pd.DataFrame, transactions_df: pd.DataFrame, language: str) -> pd.DataFrame:
     tx = transactions_df.copy()
     tx["date"] = pd.to_datetime(tx["date"])
@@ -74,12 +160,6 @@ def build_granular_diagnosis(metrics_df: pd.DataFrame, transactions_df: pd.DataF
     delay_std = tx[tx["event_type"] == "receipt"].groupby(["sku", "warehouse"], as_index=False)["delay_days"].std(ddof=0).rename(columns={"delay_days": "delay_std"})
     day_count = tx.groupby(["sku", "warehouse"], as_index=False)["date"].nunique().rename(columns={"date": "history_days"})
     latest_tx = tx.groupby(["sku", "warehouse"], as_index=False)["date"].max().rename(columns={"date": "latest_tx_date"})
-    adj_ratio = (
-        tx.assign(is_adjust=(tx["event_type"] == "adjustment").astype(int))
-        .groupby(["sku", "warehouse"], as_index=False)["is_adjust"]
-        .mean()
-        .rename(columns={"is_adjust": "adjust_ratio"})
-    )
 
     base = metrics_df.copy()
     base["date"] = pd.to_datetime(base["date"])
@@ -90,64 +170,59 @@ def build_granular_diagnosis(metrics_df: pd.DataFrame, transactions_df: pd.DataF
         .merge(delay_std, on=["sku", "warehouse"], how="left")
         .merge(day_count, on=["sku", "warehouse"], how="left")
         .merge(latest_tx, on=["sku", "warehouse"], how="left")
-        .merge(adj_ratio, on=["sku", "warehouse"], how="left")
     )
-    merged[["sales_qty", "receipt_qty", "avg_delay_days", "delay_std", "history_days", "adjust_ratio"]] = merged[[
+
+    merged[["sales_qty", "receipt_qty", "avg_delay_days", "delay_std", "history_days"]] = merged[[
         "sales_qty",
         "receipt_qty",
         "avg_delay_days",
         "delay_std",
         "history_days",
-        "adjust_ratio",
     ]].fillna(0)
+
     merged["latest_tx_date"] = pd.to_datetime(merged["latest_tx_date"], errors="coerce")
     merged["data_lag_days"] = (merged["date"] - merged["latest_tx_date"]).dt.days.fillna(0).clip(lower=0)
 
-    if "forecast_daily_demand" not in merged.columns:
-        merged["forecast_daily_demand"] = merged["avg_daily_demand"]
-    if "seasonality_index" not in merged.columns:
-        merged["seasonality_index"] = 1.0
-    if "promo_lift_index" not in merged.columns:
-        merged["promo_lift_index"] = 1.0
-    if "market_shock_index" not in merged.columns:
-        merged["market_shock_index"] = 1.0
-    if "moq_qty" not in merged.columns:
-        merged["moq_qty"] = 0.0
-    if "in_transit_blocked_flag" not in merged.columns:
-        merged["in_transit_blocked_flag"] = 0.0
-    if "cycle_count_accuracy" not in merged.columns:
-        merged["cycle_count_accuracy"] = 0.98
-    if "info_sync_delay_days" not in merged.columns:
-        merged["info_sync_delay_days"] = merged["data_lag_days"]
-    if "approval_delay_days" not in merged.columns:
-        merged["approval_delay_days"] = merged["avg_delay_days"]
+    defaults = {
+        "forecast_daily_demand": merged["avg_daily_demand"],
+        "seasonality_index": 1.0,
+        "promo_lift_index": 1.0,
+        "market_shock_index": 1.0,
+        "moq_qty": 0.0,
+        "in_transit_blocked_flag": 0.0,
+        "cycle_count_accuracy": 0.98,
+        "info_sync_delay_days": merged["data_lag_days"],
+        "approval_delay_days": merged["avg_delay_days"],
+    }
+    for col, val in defaults.items():
+        if col not in merged.columns:
+            merged[col] = val
 
-    merged["forecast_daily_demand"] = pd.to_numeric(merged["forecast_daily_demand"], errors="coerce").fillna(merged["avg_daily_demand"])
-    merged["seasonality_index"] = pd.to_numeric(merged["seasonality_index"], errors="coerce").fillna(1.0)
-    merged["promo_lift_index"] = pd.to_numeric(merged["promo_lift_index"], errors="coerce").fillna(1.0)
-    merged["market_shock_index"] = pd.to_numeric(merged["market_shock_index"], errors="coerce").fillna(1.0)
-    merged["moq_qty"] = pd.to_numeric(merged["moq_qty"], errors="coerce").fillna(0.0)
-    merged["in_transit_blocked_flag"] = pd.to_numeric(merged["in_transit_blocked_flag"], errors="coerce").fillna(0.0)
-    merged["cycle_count_accuracy"] = pd.to_numeric(merged["cycle_count_accuracy"], errors="coerce").fillna(0.98)
-    merged["info_sync_delay_days"] = pd.to_numeric(merged["info_sync_delay_days"], errors="coerce").fillna(merged["data_lag_days"])
-    merged["approval_delay_days"] = pd.to_numeric(merged["approval_delay_days"], errors="coerce").fillna(merged["avg_delay_days"])
+    for col in [
+        "forecast_daily_demand",
+        "seasonality_index",
+        "promo_lift_index",
+        "market_shock_index",
+        "moq_qty",
+        "in_transit_blocked_flag",
+        "cycle_count_accuracy",
+        "info_sync_delay_days",
+        "approval_delay_days",
+    ]:
+        merged[col] = pd.to_numeric(merged[col], errors="coerce")
 
-    receipt_tx = tx[tx["event_type"] == "receipt"].copy()
-    if receipt_tx.empty:
-        otif = pd.DataFrame(columns=["sku", "warehouse", "supplier_otif"])
-    else:
-        otif = (
-            receipt_tx.assign(on_time=(receipt_tx["delay_days"] <= 2).astype(float))
-            .groupby(["sku", "warehouse"], as_index=False)["on_time"]
-            .mean()
-            .rename(columns={"on_time": "supplier_otif"})
-        )
-    merged = merged.merge(otif, on=["sku", "warehouse"], how="left")
-    merged["supplier_otif"] = merged["supplier_otif"].fillna(0.8)
+    merged["forecast_daily_demand"] = merged["forecast_daily_demand"].fillna(merged["avg_daily_demand"])
+    merged["seasonality_index"] = merged["seasonality_index"].fillna(1.0)
+    merged["promo_lift_index"] = merged["promo_lift_index"].fillna(1.0)
+    merged["market_shock_index"] = merged["market_shock_index"].fillna(1.0)
+    merged["moq_qty"] = merged["moq_qty"].fillna(0.0)
+    merged["in_transit_blocked_flag"] = merged["in_transit_blocked_flag"].fillna(0.0)
+    merged["cycle_count_accuracy"] = merged["cycle_count_accuracy"].fillna(0.98)
+    merged["info_sync_delay_days"] = merged["info_sync_delay_days"].fillna(merged["data_lag_days"])
+    merged["approval_delay_days"] = merged["approval_delay_days"].fillna(merged["avg_delay_days"])
 
     forecast_den = merged["forecast_daily_demand"].replace(0, np.nan)
-    forecast_error = (merged["avg_daily_demand"] - merged["forecast_daily_demand"]).abs() / forecast_den
-    forecast_error = forecast_error.fillna(0.0)
+    forecast_error = ((merged["avg_daily_demand"] - merged["forecast_daily_demand"]).abs() / forecast_den).fillna(0.0)
     demand_cv = merged["avg_daily_demand"].std(ddof=0) / max(float(merged["avg_daily_demand"].mean()), 1e-9)
 
     merged["需求侧_预测不准"] = np.clip(forecast_error / 0.5, 0, 1)
@@ -160,17 +235,16 @@ def build_granular_diagnosis(metrics_df: pd.DataFrame, transactions_df: pd.DataF
     merged["供应侧_交付不稳"] = np.clip(merged["delay_std"] / 3.5, 0, 1)
     order_need = np.maximum(merged["reorder_point"] - merged["on_hand_qty"], 0)
     moq_den = merged["moq_qty"].replace(0, np.nan)
-    moq_pressure = (merged["moq_qty"] - order_need).clip(lower=0) / moq_den
-    merged["供应侧_MOQ约束"] = moq_pressure.fillna(0.0).clip(lower=0, upper=1)
+    merged["供应侧_MOQ约束"] = ((merged["moq_qty"] - order_need).clip(lower=0) / moq_den).fillna(0.0).clip(0, 1)
     merged["供应侧_运输阻塞"] = np.clip(merged["in_transit_blocked_flag"], 0, 1)
 
     ss_ratio = np.where(merged["lead_time_demand"] > 0, merged["safety_stock"] / merged["lead_time_demand"], 0)
     merged["仓储侧_安全库存设置"] = np.clip(np.abs(ss_ratio - 0.25) / 0.25, 0, 1)
     rop_den = merged["reorder_point"].replace(0, np.nan)
-    merged["仓储侧_ROP设置"] = (merged["coverage_gap"].abs() / rop_den).fillna(0.0).clip(lower=0, upper=1)
+    merged["仓储侧_ROP设置"] = (merged["coverage_gap"].abs() / rop_den).fillna(0.0).clip(0, 1)
     merged["仓储侧_阈值静态"] = np.clip((demand_cv - 0.25) / 0.6, 0, 1)
     lt_den = merged["lead_time_days"].replace(0, np.nan)
-    merged["仓储侧_交期假设"] = ((merged["avg_delay_days"] - merged["lead_time_days"]).abs() / lt_den).fillna(0.0).clip(lower=0, upper=1)
+    merged["仓储侧_交期假设"] = ((merged["avg_delay_days"] - merged["lead_time_days"]).abs() / lt_den).fillna(0.0).clip(0, 1)
 
     merged["流程侧_盘点规范"] = np.clip(1 - merged["cycle_count_accuracy"], 0, 1)
     merged["流程侧_信息同步"] = np.clip(merged["info_sync_delay_days"] / 5.0, 0, 1)
@@ -192,8 +266,21 @@ def build_granular_diagnosis(metrics_df: pd.DataFrame, transactions_df: pd.DataF
     return merged
 
 
+def build_factor_summary(granular_df: pd.DataFrame, language: str) -> pd.DataFrame:
+    factor_cols = _factor_cols(granular_df)
+    if granular_df.empty or not factor_cols:
+        return pd.DataFrame(columns=["factor", "impact_score"])
+
+    out = pd.DataFrame({"factor": factor_cols, "impact_score": [float(granular_df[c].mean()) for c in factor_cols]})
+    out = out.sort_values("impact_score", ascending=False)
+    if language == "English":
+        out["factor"] = out["factor"].map(_en_factor_name)
+    return out
+
+
 TXT = {
     "中文": {
+        "lang_picker": "界面语言",
         "title": "库存智能决策云",
         "desc": "用于库存监控、风险归因、场景模拟和补货决策的可视化系统。",
         "panel": "控制面板",
@@ -202,30 +289,30 @@ TXT = {
         "upload": "上传自定义 CSV",
         "inv_csv": "库存快照 CSV",
         "tx_csv": "交易流水 CSV",
-        "threshold": "阈值参数说明",
+        "threshold": "阈值参数",
         "stockout": "缺货阈值（Gap < 阈值）",
         "overstock": "超储阈值（库存覆盖天数 > 阈值）",
         "delay": "延迟阈值（到货延迟天数 > 阈值）",
-        "stockout_help": "当 Gap（当前库存减去再订货点）低于该值时触发缺货风险。",
-        "overstock_help": "当库存覆盖天数过高时触发超储风险。",
-        "delay_help": "当收货延迟天数超过该值时触发供应延迟报警。",
+        "stockout_help": "Gap 低于阈值时触发缺货风险。",
+        "overstock_help": "库存覆盖天数过高时触发超储风险。",
+        "delay_help": "收货延迟超过阈值时触发供应延迟报警。",
         "decision": "决策参数",
         "budget": "补货预算上限",
         "service": "目标服务水平",
         "need_upload": "请先上传两份 CSV 文件。",
         "load_fail": "数据加载失败",
-        "demo_ok": "演示数据已加载，可直接用于展示。",
-        "formula": "公式与解释（易懂版）",
+        "demo_ok": "演示数据已加载。",
+        "formula": "公式与解释（细粒度版）",
         "demo_block": "演示数据与 CSV 格式参考",
-        "preview_inv": "库存演示数据预览（前 10 行）",
-        "preview_tx": "交易演示数据预览（前 10 行）",
+        "preview_inv": "库存演示数据预览",
+        "preview_tx": "交易演示数据预览",
         "download_inv": "下载库存示例 CSV",
         "download_tx": "下载交易示例 CSV",
-        "preview_plan": "计划值/基准值样例（由演示数据自动计算）",
+        "preview_plan": "计划值样例",
         "lineage": "数据来源与计算链路",
-        "lineage_tip": "先看来源字段，再看每一步怎么算，最后看偏差如何得出。",
-        "metric_dict": "指标与计算逻辑字典（含 ABC）",
-        "abc_rule": "ABC 规则：按库存价值从高到低排序，累计占比 <=80% 为 A，80%-95% 为 B，其余为 C。",
+        "lineage_tip": "先看来源字段，再看计算过程，再看风险分形成方式。",
+        "metric_dict": "指标说明",
+        "abc_rule": "ABC 规则：按库存价值降序，累计占比 <=80% 为 A，80%-95% 为 B，其余为 C。",
         "kpi_value": "库存总价值",
         "kpi_so": "缺货风险 SKU",
         "kpi_os": "超储风险 SKU",
@@ -235,22 +322,24 @@ TXT = {
         "tab2": "监控",
         "tab3": "归因",
         "tab4": "决策",
-        "granular_in_attr": "细粒度量化（并入归因）",
+        "granular_in_attr": "细粒度评分表",
         "granular_pick": "该 SKU 的细粒度因子评分",
         "granular_lineage": "点击查看细粒度因子来源与计算",
-        "domain_scores": "四大域评分（需求/供应/仓储/流程）",
+        "domain_scores": "四大域评分",
         "health": "库存健康分布",
         "abc": "ABC 库存价值占比",
-        "risk_map": "SKU 风险图（覆盖天数 vs Gap）",
+        "risk_map": "SKU 风险图",
         "alerts": "报警中心",
-        "diag_tip": "每个 SKU 都会展示在“需求、延迟、计划”三个步骤上，相对基准多了多少/少了多少。",
+        "diag_tip": "每个 SKU 展示四大域评分和细粒度因子分。",
         "pick_sku": "选择 SKU 查看详细归因",
-        "step_delta": "步骤偏差（正数=高于基准，负数=低于基准）",
-        "step_table": "步骤明细",
-        "factor_table": "因子贡献",
         "trace": "点击查看该 SKU 计算链路",
-        "trace_table": "计算链路明细（输入 -> 公式 -> 结果）",
-        "delta_explain": "偏差计算：偏差 = 实际值 - 计划值（或基准值）",
+        "trace_table": "计算链路明细",
+        "delta_explain": "已删除旧的基准差值法，统一为细粒度评分法。",
+        "domain_overview": "四大域总分",
+        "top_factors": "高风险因子（按分值排序）",
+        "factor_col": "因子",
+        "score_col": "分值",
+        "cell_tip": "点击表格任意单元格可查看悬浮卡片详情。",
         "recs": "业务建议",
         "sim": "场景模拟与补货优先级",
         "demand_shift": "需求变化（%）",
@@ -265,37 +354,38 @@ TXT = {
         "cat_filter": "按品类筛选",
     },
     "English": {
+        "lang_picker": "Interface Language",
         "title": "Inventory Intelligence Cloud",
-        "desc": "A visual system for inventory monitoring, risk attribution, simulation, and replenishment decisions.",
+        "desc": "Visual system for inventory monitoring, risk attribution, simulation, and replenishment decisions.",
         "panel": "Control Panel",
         "source": "Data Source",
         "demo": "Use built-in demo data",
         "upload": "Upload custom CSV",
         "inv_csv": "Inventory snapshot CSV",
         "tx_csv": "Transactions CSV",
-        "threshold": "Threshold Guidance",
+        "threshold": "Threshold Settings",
         "stockout": "Stockout threshold (Gap < threshold)",
         "overstock": "Overstock threshold (Days of Inventory > threshold)",
         "delay": "Delay threshold (Delay days > threshold)",
-        "stockout_help": "Stockout alert triggers when Gap (on-hand minus reorder point) falls below this value.",
-        "overstock_help": "Overstock alert triggers when days of inventory are too high.",
-        "delay_help": "Supplier delay alert triggers when receipt delay exceeds this value.",
+        "stockout_help": "Trigger stockout risk when Gap is below threshold.",
+        "overstock_help": "Trigger overstock risk when inventory coverage days are too high.",
+        "delay_help": "Trigger supplier delay alert when receipt delay exceeds threshold.",
         "decision": "Decision Settings",
         "budget": "Replenishment budget cap",
         "service": "Target service level",
-        "need_upload": "Please upload both CSV files first.",
+        "need_upload": "Please upload both CSV files.",
         "load_fail": "Data loading failed",
-        "demo_ok": "Demo data loaded and ready for presentation.",
-        "formula": "Formulas and Explanation (Easy Version)",
+        "demo_ok": "Demo data loaded.",
+        "formula": "Formulas and Explanation (Granular)",
         "demo_block": "Demo Data and CSV Format Reference",
-        "preview_inv": "Inventory demo preview (top 10)",
-        "preview_tx": "Transactions demo preview (top 10)",
+        "preview_inv": "Inventory demo preview",
+        "preview_tx": "Transactions demo preview",
         "download_inv": "Download inventory sample CSV",
         "download_tx": "Download transactions sample CSV",
-        "preview_plan": "Planned / benchmark value examples (computed from demo data)",
+        "preview_plan": "Planned values sample",
         "lineage": "Data Source and Calculation Lineage",
-        "lineage_tip": "First see source columns, then formulas, then how deltas are computed.",
-        "metric_dict": "Metric and Calculation Dictionary (including ABC)",
+        "lineage_tip": "Check source fields first, then calculations, then score aggregation.",
+        "metric_dict": "Metric Dictionary",
         "abc_rule": "ABC rule: sort by inventory value desc; cumulative share <=80% is A, 80%-95% is B, remaining is C.",
         "kpi_value": "Total Inventory Value",
         "kpi_so": "Stockout Risk SKU",
@@ -306,22 +396,24 @@ TXT = {
         "tab2": "Monitoring",
         "tab3": "Attribution",
         "tab4": "Actions",
-        "granular_in_attr": "Granular Quantification (inside Attribution)",
-        "granular_pick": "Granular factor scores for this SKU",
-        "granular_lineage": "Click to view source and formula for granular factors",
-        "domain_scores": "Domain scores (Demand/Supply/Warehouse/Process)",
+        "granular_in_attr": "Granular Score Table",
+        "granular_pick": "Granular factor scores for selected SKU",
+        "granular_lineage": "Click to view granular factor source and formula",
+        "domain_scores": "Domain Scores",
         "health": "Inventory Health Distribution",
-        "abc": "Inventory Value by ABC Class",
-        "risk_map": "SKU Risk Map (DOI vs Gap)",
+        "abc": "Inventory Value by ABC",
+        "risk_map": "SKU Risk Map",
         "alerts": "Alert Center",
-        "diag_tip": "Each SKU is decomposed into three steps: demand, delay, and planning. You can see how much each is above/below benchmark.",
+        "diag_tip": "Each SKU shows domain scores and granular factor scores.",
         "pick_sku": "Select SKU for detailed attribution",
-        "step_delta": "Step Delta (positive=above benchmark, negative=below)",
-        "step_table": "Step Breakdown",
-        "factor_table": "Factor Contribution",
         "trace": "Click to view SKU calculation trace",
-        "trace_table": "Calculation trace (Input -> Formula -> Result)",
-        "delta_explain": "Delta formula: Delta = Actual - Planned (or Benchmark)",
+        "trace_table": "Calculation trace details",
+        "delta_explain": "Legacy benchmark-delta method has been removed. Granular scoring is now the only method.",
+        "domain_overview": "Domain Score Overview",
+        "top_factors": "Top Risk Factors (sorted by score)",
+        "factor_col": "factor",
+        "score_col": "score",
+        "cell_tip": "Click any table cell to open a floating detail card.",
         "recs": "Business Recommendations",
         "sim": "Scenario Simulation and Replenishment Priority",
         "demand_shift": "Demand shift (%)",
@@ -331,7 +423,7 @@ TXT = {
         "var_sim": "Simulated value at risk",
         "plan": "Budget-constrained replenishment list",
         "drill": "Operational Drill-down",
-        "no_data": "No data after filtering, please adjust filters.",
+        "no_data": "No data after filtering. Adjust your filters.",
         "wh_filter": "Filter by warehouse",
         "cat_filter": "Filter by category",
     },
@@ -339,7 +431,8 @@ TXT = {
 
 
 with st.sidebar:
-    language = st.selectbox("界面语言 / Interface", ["中文", "English"], index=0)
+    language = st.selectbox("界面语言" if st.session_state.get("lang", "中文") == "中文" else "Interface Language", ["中文", "English"], index=0)
+    st.session_state["lang"] = language
     t = TXT[language]
 
     st.header(t["panel"])
@@ -359,7 +452,7 @@ with st.sidebar:
 
 st.markdown(
     f"""
-<div class="hero">
+<div class=\"hero\">
   <h1>{t['title']}</h1>
   <p>{t['desc']}</p>
 </div>
@@ -371,10 +464,10 @@ inventory_file = None
 transactions_file = None
 
 if source_mode == t["upload"]:
-    up1, up2 = st.columns(2)
-    with up1:
+    c_up_1, c_up_2 = st.columns(2)
+    with c_up_1:
         inventory_file = st.file_uploader(t["inv_csv"], type=["csv"])
-    with up2:
+    with c_up_2:
         transactions_file = st.file_uploader(t["tx_csv"], type=["csv"])
 
 if source_mode == t["demo"]:
@@ -397,15 +490,15 @@ with st.expander(t["demo_block"], expanded=False):
     c1, c2 = st.columns(2)
     with c1:
         st.write(t["preview_inv"])
-        st.dataframe(demo_inv.head(10), use_container_width=True)
+        render_calc_table(demo_inv.head(10), key="demo_inv_table", language=language)
         st.download_button(t["download_inv"], to_csv_bytes(demo_inv), "inventory_demo.csv", "text/csv")
     with c2:
         st.write(t["preview_tx"])
-        st.dataframe(demo_tx.head(10), use_container_width=True)
+        render_calc_table(demo_tx.head(10), key="demo_tx_table", language=language)
         st.download_button(t["download_tx"], to_csv_bytes(demo_tx), "transactions_demo.csv", "text/csv")
 
     st.write(t["preview_plan"])
-    st.dataframe(
+    render_calc_table(
         demo_plan[[
             "sku",
             "warehouse",
@@ -418,80 +511,55 @@ with st.expander(t["demo_block"], expanded=False):
             "coverage_gap",
             "abc_class",
         ]].head(10),
-        use_container_width=True,
+        key="demo_plan_table",
+        language=language,
     )
 
 with st.expander(t["formula"], expanded=False):
     if language == "中文":
         st.markdown(
-            r"""
-### 1) 库存覆盖天数（Days of Inventory）
+            """
+### 1) 基础库存指标
 
-$$
-    \text{库存覆盖天数} = \frac{\text{当前库存数量}}{\text{日均需求数量}}
-$$
+- 库存覆盖天数 = 当前库存数量 / 日均需求数量
+- 交期需求量 = 日均需求数量 × 补货交期天数
+- 安全库存 = z × 需求标准差 × sqrt(补货交期天数)
+- 再订货点 = 交期需求量 + 安全库存
 
-### 2) 交期需求量（Lead-time Demand）
+### 2) 细粒度因子评分（0-1）
 
-$$
-    \text{交期需求量} = \text{日均需求数量} \times \text{补货交期天数}
-$$
+- 需求侧：预测不准分 = |实际需求 - 预测需求| / 预测需求，再归一化到 0-1
+- 供应侧：供应商延迟分 = 平均延迟天 / 7，再归一化到 0-1
+- 仓储侧：ROP 设置分 = |Gap| / 再订货点，再归一化到 0-1
+- 流程侧：信息同步分 = 信息同步延迟天 / 5，再归一化到 0-1
 
-### 3) 安全库存（Safety Stock）
+### 3) 域评分与总评分
 
-$$
-    \text{安全库存} = z \times \text{需求波动标准差} \times \sqrt{\text{补货交期天数}}
-$$
-
-### 4) 再订货点（Reorder Point）
-
-$$
-    \text{再订货点} = \text{交期需求量} + \text{安全库存}
-$$
-
-### 5) Gap（库存缺口）
-
-$$
-    \text{Gap} = \text{当前库存数量} - \text{再订货点}
-$$
-
-解释：Gap < 0 表示低于补货安全线，Gap > 0 表示高于补货安全线。
+- 域评分 = 该域全部因子分的平均值
+- 总评分 = 四大域全部因子分的平均值
 """
         )
     else:
         st.markdown(
-            r"""
-### 1) Days of Inventory
+            """
+### 1) Base Inventory Metrics
 
-$$
-        \text{Days of Inventory} = \frac{\text{On-hand Quantity}}{\text{Average Daily Demand}}
-$$
+- Days of Inventory = On-hand Quantity / Average Daily Demand
+- Lead-time Demand = Average Daily Demand × Lead-time Days
+- Safety Stock = z × demand std × sqrt(lead-time days)
+- Reorder Point = Lead-time Demand + Safety Stock
 
-### 2) Lead-time Demand
+### 2) Granular Factor Scoring (0-1)
 
-$$
-        \text{Lead-time Demand} = \text{Average Daily Demand} \times \text{Lead-time Days}
-$$
+- Demand: forecast error = |actual - forecast| / forecast, normalized to 0-1
+- Supply: supplier delay = avg_delay_days / 7, normalized to 0-1
+- Warehouse: ROP setting = |Gap| / reorder_point, normalized to 0-1
+- Process: info sync = info_sync_delay_days / 5, normalized to 0-1
 
-### 3) Safety Stock
+### 3) Domain and Overall Scores
 
-$$
-        \text{Safety Stock} = z \times \text{Demand Std Dev} \times \sqrt{\text{Lead-time Days}}
-$$
-
-### 4) Reorder Point
-
-$$
-        \text{Reorder Point} = \text{Lead-time Demand} + \text{Safety Stock}
-$$
-
-### 5) Gap
-
-$$
-        \text{Gap} = \text{On-hand Quantity} - \text{Reorder Point}
-$$
-
-Interpretation: Gap < 0 means below safety line; Gap > 0 means safer coverage.
+- Domain score = mean of all factors in the domain
+- Overall score = mean of all factors across four domains
 """
         )
 
@@ -502,11 +570,11 @@ with st.expander(t["lineage"], expanded=False):
             """
 | 步骤 | 输入来源 | 输出字段 | 说明 |
 |---|---|---|---|
-| 库存基础数据 | `inventory.csv` | `on_hand_qty`, `avg_daily_demand`, `lead_time_days`, `unit_cost` | 原始库存和需求数据 |
-| 交易数据 | `transactions.csv` | `event_type`, `qty`, `delay_days` | 销售/入库/延迟信息 |
-| 计划值计算 | 库存基础数据 | `lead_time_demand`, `safety_stock`, `reorder_point` | 形成计划值/基准值 |
-| 偏差计算 | 实际值 + 计划值 | `coverage_gap`, `demand_delta`, `delay_delta`, `planning_delta` | 偏差 = 实际 - 计划 |
-| 归因贡献 | 偏差与信号 | `impact_score` | 偏差标准化后的贡献占比 |
+| 库存基础数据 | inventory.csv | on_hand_qty, avg_daily_demand, lead_time_days, unit_cost | 原始库存和需求数据 |
+| 交易数据 | transactions.csv | event_type, qty, delay_days | 销售/入库/延迟信息 |
+| 计划值计算 | 库存基础数据 | lead_time_demand, safety_stock, reorder_point | 形成计划值 |
+| 细粒度因子计算 | 实际值 + 计划值 + 交易行为 | 需求/供应/仓储/流程因子分 | 每个因子归一化到 0-1 |
+| 风险评分聚合 | 各因子分 | domain_score 与 overall_score | 域均值与总均值 |
 """
         )
     else:
@@ -514,11 +582,11 @@ with st.expander(t["lineage"], expanded=False):
             """
 | Step | Source Input | Output Fields | Description |
 |---|---|---|---|
-| Inventory base | `inventory.csv` | `on_hand_qty`, `avg_daily_demand`, `lead_time_days`, `unit_cost` | Raw stock and demand data |
-| Transactions | `transactions.csv` | `event_type`, `qty`, `delay_days` | Sales/receipt/delay events |
-| Planned value | Inventory base | `lead_time_demand`, `safety_stock`, `reorder_point` | Planned/benchmark values |
-| Delta calculation | Actual + planned | `coverage_gap`, `demand_delta`, `delay_delta`, `planning_delta` | Delta = Actual - Planned |
-| Attribution score | Deltas and signals | `impact_score` | Normalized contribution |
+| Inventory base | inventory.csv | on_hand_qty, avg_daily_demand, lead_time_days, unit_cost | Raw stock and demand data |
+| Transactions | transactions.csv | event_type, qty, delay_days | Sales/receipt/delay events |
+| Planned value | Inventory base | lead_time_demand, safety_stock, reorder_point | Planned values |
+| Granular factor calculation | Actual + planned + transaction behavior | demand/supply/warehouse/process factor scores | Each factor is normalized to 0-1 |
+| Risk aggregation | Factor scores | domain_score and overall_score | Domain mean and overall mean |
 """
         )
 
@@ -526,36 +594,38 @@ with st.expander(t["metric_dict"], expanded=False):
     if language == "中文":
         st.markdown(
             """
-- 库存总价值：`on_hand_qty * unit_cost`
-- 缺货风险：`coverage_gap < 阈值`
-- 超储风险：`库存覆盖天数 > 阈值`
-- 周转率代理：`销售总量 / 平均库存数量`
-- 服务水平代理：`coverage_gap >= 0` 的 SKU 占比
-- 需求偏差：`(销售量-入库量) - 基准(销售量-入库量)`
-- 延迟偏差：`平均延迟天数 - 基准延迟天数`
-- 计划偏差：`|Gap| - 基准|Gap|`
-- ABC：按库存价值降序，累计占比 <=80% 为 A，80%-95% 为 B，>95% 为 C
+- 库存总价值：on_hand_qty * unit_cost
+- 缺货风险：coverage_gap < 阈值
+- 超储风险：库存覆盖天数 > 阈值
+- 周转率代理：销售总量 / 平均库存数量
+- 服务水平代理：coverage_gap >= 0 的 SKU 占比
+- 需求域评分：需求侧因子均值
+- 供应域评分：供应侧因子均值
+- 仓储域评分：仓储侧因子均值
+- 流程域评分：流程侧因子均值
+- 总评分：四大域全部因子均值
+- ABC：按库存价值降序，累计占比 <=80% 为 A，80%-95% 为 B，其余为 C
 """
         )
-        st.info(t["abc_rule"])
     else:
         st.markdown(
             """
-- Total inventory value: `on_hand_qty * unit_cost`
-- Stockout risk: `coverage_gap < threshold`
-- Overstock risk: `days_of_inventory > threshold`
-- Turnover proxy: `total_sales_qty / average_inventory_qty`
-- Service-level proxy: share of SKUs where `coverage_gap >= 0`
-- Demand delta: `(sales_qty - receipt_qty) - benchmark(sales_qty - receipt_qty)`
-- Delay delta: `avg_delay_days - benchmark_delay_days`
-- Planning delta: `|Gap| - benchmark|Gap|`
-- ABC: sort by value desc; cumulative <=80% is A, 80%-95% is B, >95% is C
+- Total inventory value: on_hand_qty * unit_cost
+- Stockout risk: coverage_gap < threshold
+- Overstock risk: days_of_inventory > threshold
+- Turnover proxy: total_sales_qty / average_inventory_qty
+- Service-level proxy: share of SKUs where coverage_gap >= 0
+- Demand domain score: mean of demand factors
+- Supply domain score: mean of supply factors
+- Warehouse domain score: mean of warehouse factors
+- Process domain score: mean of process factors
+- Overall score: mean of all factors across four domains
+- ABC: cumulative value <=80% A, 80%-95% B, >95% C
 """
         )
-        st.info(t["abc_rule"])
+    st.info(t["abc_rule"])
 
 metrics_df = abc_classification(build_inventory_metrics(inventory_df))
-
 alerts_df = detect_alerts(
     metrics_df,
     transactions_df,
@@ -566,10 +636,6 @@ alerts_df = detect_alerts(
     ),
 )
 
-attribution_df = root_cause_attribution(metrics_df, transactions_df)
-step_df = attribution_step_breakdown(metrics_df, transactions_df)
-recs_df = generate_recommendations(metrics_df, attribution_df)
-
 f1, f2 = st.columns(2)
 with f1:
     wh_options = sorted(metrics_df["warehouse"].unique().tolist())
@@ -578,20 +644,17 @@ with f2:
     cat_options = sorted(metrics_df["category"].unique().tolist())
     selected_cat = st.multiselect(t["cat_filter"], options=cat_options, default=cat_options)
 
-filtered_metrics = metrics_df[
-    metrics_df["warehouse"].isin(selected_wh) & metrics_df["category"].isin(selected_cat)
-].copy()
-
+filtered_metrics = metrics_df[metrics_df["warehouse"].isin(selected_wh) & metrics_df["category"].isin(selected_cat)].copy()
 if filtered_metrics.empty:
     st.warning(t["no_data"])
     st.stop()
 
 filtered_alerts = alerts_df[alerts_df["warehouse"].isin(selected_wh)] if not alerts_df.empty else alerts_df
-filtered_attr = attribution_df[attribution_df["warehouse"].isin(selected_wh)] if not attribution_df.empty else attribution_df
-filtered_steps = step_df[step_df["warehouse"].isin(selected_wh)] if not step_df.empty else step_df
-filtered_recs = recs_df[recs_df["sku"].isin(filtered_metrics["sku"]) | (recs_df["sku"] == "ALL")]
 filtered_tx = transactions_df[transactions_df["warehouse"].isin(selected_wh)].copy()
 granular_df = build_granular_diagnosis(filtered_metrics, filtered_tx, language)
+factor_summary_df = build_factor_summary(granular_df, language)
+recs_df = generate_recommendations(filtered_metrics, factor_summary_df, language)
+filtered_recs = recs_df[recs_df["sku"].isin(filtered_metrics["sku"]) | (recs_df["sku"] == "ALL")]
 
 kpis = build_kpi_summary(filtered_metrics, transactions_df[transactions_df["warehouse"].isin(selected_wh)])
 
@@ -624,114 +687,88 @@ with tab2:
     fig.add_hline(y=0, line_dash="dash", line_color="#dc2626")
     st.plotly_chart(fig, use_container_width=True)
     st.subheader(t["alerts"])
-    st.dataframe(filtered_alerts, use_container_width=True)
+    render_calc_table(filtered_alerts, key="alerts_table", language=language)
 
 with tab3:
     st.caption(t["diag_tip"])
     st.info(t["delta_explain"])
-    if filtered_steps.empty:
-        st.info("当前阈值下没有缺货风险 SKU。" if language == "中文" else "No stockout-risk SKU under current thresholds.")
+    st.caption(t["cell_tip"])
+
+    if granular_df.empty:
+        st.info("当前筛选下暂无可用归因数据。" if language == "中文" else "No attribution data under current filters.")
     else:
-        sku_options = sorted(filtered_steps["sku"].unique().tolist())
-        sku = st.selectbox(t["pick_sku"], sku_options)
-        sku_step = filtered_steps[filtered_steps["sku"] == sku].copy()
-        sku_attr = filtered_attr[filtered_attr["sku"] == sku].copy()
-        row = sku_step.iloc[0]
+        sku = st.selectbox(t["pick_sku"], sorted(granular_df["sku"].unique().tolist()))
+        g = granular_df[granular_df["sku"] == sku].iloc[0]
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("需求偏差" if language == "中文" else "Demand Delta", f"{row['demand_delta']:+.2f}")
-        c2.metric("延迟偏差" if language == "中文" else "Delay Delta", f"{row['delay_delta']:+.2f}")
-        c3.metric("计划偏差" if language == "中文" else "Planning Delta", f"{row['planning_delta']:+.2f}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("需求域" if language == "中文" else "Demand", f"{float(g['demand_domain_score']):.2f}")
+        c2.metric("供应域" if language == "中文" else "Supply", f"{float(g['supply_domain_score']):.2f}")
+        c3.metric("仓储域" if language == "中文" else "Warehouse", f"{float(g['warehouse_domain_score']):.2f}")
+        c4.metric("流程域" if language == "中文" else "Process", f"{float(g['process_domain_score']):.2f}")
 
-        chart_df = pd.DataFrame(
-            {
-                ("步骤" if language == "中文" else "Step"): [
-                    "需求偏差" if language == "中文" else "Demand Delta",
-                    "延迟偏差" if language == "中文" else "Delay Delta",
-                    "计划偏差" if language == "中文" else "Planning Delta",
-                ],
-                ("偏差值" if language == "中文" else "Delta"): [
-                    float(row["demand_delta"]),
-                    float(row["delay_delta"]),
-                    float(row["planning_delta"]),
-                ],
-            }
+        domain_scores = pd.DataFrame(
+            [
+                {"domain": "需求" if language == "中文" else "demand", "score": float(g["demand_domain_score"])},
+                {"domain": "供应" if language == "中文" else "supply", "score": float(g["supply_domain_score"])},
+                {"domain": "仓储" if language == "中文" else "warehouse", "score": float(g["warehouse_domain_score"])},
+                {"domain": "流程" if language == "中文" else "process", "score": float(g["process_domain_score"])},
+            ]
         )
-        st.plotly_chart(px.bar(chart_df, x=chart_df.columns[0], y=chart_df.columns[1], title=t["step_delta"]), use_container_width=True)
+        st.subheader(t["domain_overview"])
+        st.plotly_chart(px.bar(domain_scores, x="domain", y="score", title=t["domain_scores"]), use_container_width=True)
+        render_calc_table(domain_scores, key="domain_scores_table", language=language, col_help={"score": "域内因子均值" if language == "中文" else "Mean of factors in this domain"})
 
-        st.subheader(t["step_table"])
-        step_view = sku_step[[
-            "sku",
-            "warehouse",
-            "sales_qty",
-            "receipt_qty",
-            "sales_minus_receipt",
-            "bench_sales_gap",
-            "demand_delta",
-            "avg_delay_days",
-            "bench_delay",
-            "delay_delta",
-            "abs_gap",
-            "bench_gap",
-            "planning_delta",
-            "dominant_factor",
-            "confidence",
-        ]].copy()
-        if language == "中文":
-            step_view = step_view.rename(
-                columns={
-                    "sku": "SKU",
-                    "warehouse": "仓库",
-                    "sales_qty": "实际销售量",
-                    "receipt_qty": "实际入库量",
-                    "sales_minus_receipt": "实际(销售-入库)",
-                    "bench_sales_gap": "计划值(销售-入库)",
-                    "demand_delta": "需求偏差",
-                    "avg_delay_days": "实际平均延迟天",
-                    "bench_delay": "计划值延迟天",
-                    "delay_delta": "延迟偏差",
-                    "abs_gap": "实际|Gap|",
-                    "bench_gap": "计划值|Gap|",
-                    "planning_delta": "计划偏差",
-                    "dominant_factor": "主导因子",
-                    "confidence": "置信度",
-                }
-            )
-        st.dataframe(step_view, use_container_width=True)
+        factor_rows = []
+        for c in _factor_cols(granular_df):
+            factor_rows.append({
+                t["factor_col"]: c if language == "中文" else _en_factor_name(c),
+                t["score_col"]: float(g[c]),
+            })
+        factor_table = pd.DataFrame(factor_rows).sort_values(t["score_col"], ascending=False)
+
+        st.subheader(t["top_factors"])
+        st.plotly_chart(px.bar(factor_table.head(10), x=t["factor_col"], y=t["score_col"], title=t["top_factors"]), use_container_width=True)
+        render_calc_table(
+            factor_table,
+            key="factor_table",
+            language=language,
+            col_help={
+                t["score_col"]: "因子归一化风险分，范围 0-1。" if language == "中文" else "Normalized factor score in range 0-1.",
+            },
+        )
 
         with st.expander(t["trace"], expanded=False):
-            sku_metric = filtered_metrics[filtered_metrics["sku"] == sku].iloc[0]
-            trace_rows = [
-                {
-                    "Metric": "Lead-time Demand",
-                    "Input": f"avg_daily_demand={sku_metric['avg_daily_demand']:.2f}, lead_time_days={sku_metric['lead_time_days']:.2f}",
-                    "Formula": "avg_daily_demand * lead_time_days",
-                    "Result": f"{sku_metric['lead_time_demand']:.2f}",
-                },
-                {
-                    "Metric": "Safety Stock",
-                    "Input": f"z=1.65, demand_std(global), lead_time_days={sku_metric['lead_time_days']:.2f}",
-                    "Formula": "z * std(demand) * sqrt(lead_time_days)",
-                    "Result": f"{sku_metric['safety_stock']:.2f}",
-                },
-                {
-                    "Metric": "Reorder Point (Planned)",
-                    "Input": f"lead_time_demand={sku_metric['lead_time_demand']:.2f}, safety_stock={sku_metric['safety_stock']:.2f}",
-                    "Formula": "lead_time_demand + safety_stock",
-                    "Result": f"{sku_metric['reorder_point']:.2f}",
-                },
-                {
-                    "Metric": "Gap",
-                    "Input": f"on_hand_qty={sku_metric['on_hand_qty']:.2f}, reorder_point={sku_metric['reorder_point']:.2f}",
-                    "Formula": "on_hand_qty - reorder_point",
-                    "Result": f"{sku_metric['coverage_gap']:.2f}",
-                },
-            ]
+            m = filtered_metrics[filtered_metrics["sku"] == sku].iloc[0]
+            trace_rows = pd.DataFrame(
+                [
+                    {
+                        "metric": "交期需求量" if language == "中文" else "lead_time_demand",
+                        "input": f"avg_daily_demand={m['avg_daily_demand']:.2f}, lead_time_days={m['lead_time_days']:.2f}",
+                        "formula": "avg_daily_demand * lead_time_days",
+                        "result": float(m["lead_time_demand"]),
+                    },
+                    {
+                        "metric": "安全库存" if language == "中文" else "safety_stock",
+                        "input": f"z=1.65, demand_std(global), lead_time_days={m['lead_time_days']:.2f}",
+                        "formula": "z * std(demand) * sqrt(lead_time_days)",
+                        "result": float(m["safety_stock"]),
+                    },
+                    {
+                        "metric": "再订货点" if language == "中文" else "reorder_point",
+                        "input": f"lead_time_demand={m['lead_time_demand']:.2f}, safety_stock={m['safety_stock']:.2f}",
+                        "formula": "lead_time_demand + safety_stock",
+                        "result": float(m["reorder_point"]),
+                    },
+                    {
+                        "metric": "Gap",
+                        "input": f"on_hand_qty={m['on_hand_qty']:.2f}, reorder_point={m['reorder_point']:.2f}",
+                        "formula": "on_hand_qty - reorder_point",
+                        "result": float(m["coverage_gap"]),
+                    },
+                ]
+            )
             st.subheader(t["trace_table"])
-            st.dataframe(pd.DataFrame(trace_rows), use_container_width=True)
-
-        st.subheader(t["factor_table"])
-        st.dataframe(sku_attr, use_container_width=True)
+            render_calc_table(trace_rows, key="trace_table", language=language)
 
         st.subheader(t["granular_in_attr"])
         granular_cols = [
@@ -743,100 +780,17 @@ with tab3:
             "supply_domain_score",
             "warehouse_domain_score",
             "process_domain_score",
-            "需求侧_预测不准",
-            "需求侧_历史不足",
-            "需求侧_季节波动",
-            "需求侧_促销冲击",
-            "需求侧_突变风险",
-            "供应侧_供应商延迟",
-            "供应侧_交付不稳",
-            "供应侧_MOQ约束",
-            "供应侧_运输阻塞",
-            "仓储侧_安全库存设置",
-            "仓储侧_ROP设置",
-            "仓储侧_阈值静态",
-            "仓储侧_交期假设",
-            "流程侧_盘点规范",
-            "流程侧_信息同步",
-            "流程侧_审批速度",
-            "流程侧_数据滞后",
-        ]
+        ] + _factor_cols(granular_df)
         sku_granular = granular_df[granular_df["sku"] == sku][granular_cols].copy()
         if language == "English":
-            sku_granular = sku_granular.rename(
-                columns={
-                    "overall_level": "overall_level",
-                    "demand_domain_score": "demand_domain_score",
-                    "supply_domain_score": "supply_domain_score",
-                    "warehouse_domain_score": "warehouse_domain_score",
-                    "process_domain_score": "process_domain_score",
-                    "需求侧_预测不准": "demand_forecast_error",
-                    "需求侧_历史不足": "demand_insufficient_history",
-                    "需求侧_季节波动": "demand_seasonality",
-                    "需求侧_促销冲击": "demand_promotion_shock",
-                    "需求侧_突变风险": "demand_market_shift",
-                    "供应侧_供应商延迟": "supply_supplier_delay",
-                    "供应侧_交付不稳": "supply_delivery_instability",
-                    "供应侧_MOQ约束": "supply_moq_pressure",
-                    "供应侧_运输阻塞": "supply_transport_block",
-                    "仓储侧_安全库存设置": "warehouse_safety_stock_setting",
-                    "仓储侧_ROP设置": "warehouse_rop_setting",
-                    "仓储侧_阈值静态": "warehouse_static_threshold",
-                    "仓储侧_交期假设": "warehouse_leadtime_assumption",
-                    "流程侧_盘点规范": "process_cycle_counting",
-                    "流程侧_信息同步": "process_info_sync",
-                    "流程侧_审批速度": "process_approval_speed",
-                    "流程侧_数据滞后": "process_data_latency",
-                }
-            )
+            sku_granular = sku_granular.rename(columns={c: _en_factor_name(c) for c in _factor_cols(granular_df)})
 
         st.caption(t["granular_pick"])
-        st.dataframe(sku_granular, use_container_width=True)
-
-        with st.expander(t["granular_lineage"], expanded=False):
-            g = granular_df[granular_df["sku"] == sku].iloc[0]
-            domain_scores = pd.DataFrame(
-                [
-                    {"domain": "demand", "score": float(g["demand_domain_score"])},
-                    {"domain": "supply", "score": float(g["supply_domain_score"])},
-                    {"domain": "warehouse", "score": float(g["warehouse_domain_score"])},
-                    {"domain": "process", "score": float(g["process_domain_score"])},
-                ]
-            )
-            st.write(t["domain_scores"])
-            st.dataframe(domain_scores, use_container_width=True)
-
-            lineage_rows = [
-                {
-                    "factor": "需求侧_预测不准" if language == "中文" else "demand_forecast_error",
-                    "source": f"avg_daily_demand={g['avg_daily_demand']:.2f}, forecast_daily_demand={g['forecast_daily_demand']:.2f}",
-                    "formula": "abs(actual-forecast)/forecast, then clipped to [0,1]",
-                    "score": float(g["需求侧_预测不准"]),
-                },
-                {
-                    "factor": "供应侧_供应商延迟" if language == "中文" else "supply_supplier_delay",
-                    "source": f"avg_delay_days={g['avg_delay_days']:.2f}",
-                    "formula": "avg_delay_days / 7, clipped to [0,1]",
-                    "score": float(g["供应侧_供应商延迟"]),
-                },
-                {
-                    "factor": "仓储侧_ROP设置" if language == "中文" else "warehouse_rop_setting",
-                    "source": f"coverage_gap={g['coverage_gap']:.2f}, reorder_point={g['reorder_point']:.2f}",
-                    "formula": "abs(coverage_gap)/reorder_point, clipped to [0,1]",
-                    "score": float(g["仓储侧_ROP设置"]),
-                },
-                {
-                    "factor": "流程侧_信息同步" if language == "中文" else "process_info_sync",
-                    "source": f"info_sync_delay_days={g['info_sync_delay_days']:.2f}",
-                    "formula": "info_sync_delay_days/5, clipped to [0,1]",
-                    "score": float(g["流程侧_信息同步"]),
-                },
-            ]
-            st.dataframe(pd.DataFrame(lineage_rows), use_container_width=True)
+        render_calc_table(sku_granular, key="sku_granular_table", language=language)
 
 with tab4:
     st.subheader(t["recs"])
-    st.dataframe(filtered_recs, use_container_width=True)
+    render_calc_table(filtered_recs, key="recs_table", language=language)
 
     st.subheader(t["sim"])
     s1, s2 = st.columns(2)
@@ -871,7 +825,7 @@ with tab4:
         plan["cum_investment"] = plan["investment"].cumsum()
         selected_plan = plan[plan["cum_investment"] <= budget_cap].copy()
         st.subheader(t["plan"])
-        st.dataframe(selected_plan, use_container_width=True)
+        render_calc_table(selected_plan, key="selected_plan_table", language=language)
 
     st.subheader(t["drill"])
-    st.dataframe(filtered_metrics, use_container_width=True)
+    render_calc_table(filtered_metrics, key="drill_table", language=language)

@@ -61,7 +61,7 @@ Upload both files:
 - delay_days
 - supplier
 
-## 5. Formula Transparency / 公式透明化（含 Gap 计算）
+## 5. Formula Transparency / 公式透明化（细粒度评分）
 
 ### Core formulas / 核心公式
 
@@ -69,12 +69,16 @@ Upload both files:
 - lead_time_demand = avg_daily_demand * lead_time_days
 - safety_stock = z * std(avg_daily_demand) * sqrt(lead_time_days)
 - reorder_point = lead_time_demand + safety_stock
-- coverage_gap (Gap) = on_hand_qty - reorder_point
+- coverage_gap = on_hand_qty - reorder_point
 
-### How to read Gap / Gap 的含义
+### Granular scoring / 细粒度评分
 
-- Gap < 0: below reorder point, stockout risk / 低于再订货点，存在缺货风险
-- Gap > 0: above reorder point, safer coverage / 高于再订货点，覆盖更安全
+- Demand forecast error = |actual demand - forecast demand| / forecast demand, normalized to 0-1
+- Supplier delay score = avg_delay_days / 7, normalized to 0-1
+- ROP setting score = |coverage_gap| / reorder_point, normalized to 0-1
+- Info sync score = info_sync_delay_days / 5, normalized to 0-1
+- Domain score = mean of the factors in that domain
+- Overall score = mean of all factors across four domains
 
 ### Replenishment base qty / 补货基础量
 
