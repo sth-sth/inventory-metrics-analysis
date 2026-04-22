@@ -319,3 +319,100 @@ def build_issue_breakdown(metric_row: pd.Series, language: str, stockout_thresho
         if "issue" in out.columns:
             out["domain"] = out["issue"].map(domain_map).fillna("Other")
     return out
+
+
+def build_business_checklist(issue_df: pd.DataFrame, language: str) -> pd.DataFrame:
+    if issue_df is None or issue_df.empty:
+        if language == "中文":
+            return pd.DataFrame(columns=["核对顺序", "核对侧", "检查结果", "重点证据", "建议动作"])
+        return pd.DataFrame(columns=["step", "domain", "status", "evidence", "action"])
+
+    is_cn = language == "中文"
+    domain_col = "分类" if is_cn else "domain"
+    issue_col = "问题" if is_cn else "issue"
+    current_col = "当前值" if is_cn else "current"
+    gap_col = "差了多少" if is_cn else "gap"
+    warehouse_col = "仓库" if is_cn else "warehouse"
+    abs_col = "偏差绝对值" if is_cn else "absolute_gap"
+
+    if is_cn:
+        domain_meta = [
+            ("需求侧", "核对预测、促销、季节性与异常订单", "先确认需求口径是否稳定", "当前未发现需求侧异常"),
+            ("供应侧", "核对收货延迟、供应商履约与在途计划", "先排查供应延误是否推高风险", "当前未发现供应侧异常"),
+            ("仓储侧", "核对在手、ROP、DOH 与补货节奏", "先统一缺货与超储的判断口径", "当前未发现仓储侧异常"),
+            ("流程侧", "核对数据滞后、盘点准确率与主数据同步", "先确认数据是否可靠", "当前未发现流程侧异常"),
+        ]
+        conflict_row = {
+            "核对侧": "库存口径复核",
+            "检查结果": "需复核",
+            "重点证据": "同一 SKU 同时触发缺货与超储表观信号",
+            "建议动作": "先统一需求均值、预测口径、ROP 和 DOH 阈值，再决定补货或去库存。",
+        }
+        status_ok = "正常"
+        status_review = "需核对"
+        stockout_issue = "库存缺口"
+        overstock_issue = "库存覆盖过高"
+    else:
+        domain_meta = [
+            ("Demand", "Check forecast, promotions, seasonality, and abnormal orders", "Confirm the demand basis before taking action", "No demand-side issue detected"),
+            ("Supply", "Check receipt delay, supplier performance, and in-transit plan", "Verify whether supply delay is amplifying risk", "No supply-side issue detected"),
+            ("Warehouse", "Check on-hand, ROP, DOH, and replenishment cadence", "Align stockout and overstock logic first", "No warehouse-side issue detected"),
+            ("Process", "Check data lag, cycle count accuracy, and master data sync", "Confirm the data is trustworthy first", "No process-side issue detected"),
+        ]
+        conflict_row = {
+            "domain": "Inventory logic check",
+            "status": "Review",
+            "evidence": "Same SKU triggers both stockout and overstock signals",
+            "action": "Align demand, forecast, ROP, and DOH thresholds first, then decide replenish vs. clear-out.",
+        }
+        status_ok = "OK"
+        status_review = "Review"
+        stockout_issue = "Inventory gap"
+        overstock_issue = "High inventory coverage"
+
+    rows: list[dict[str, object]] = []
+    for idx, (domain, check_text, action_text, normal_text) in enumerate(domain_meta, start=1):
+        domain_df = issue_df[issue_df[domain_col] == domain].copy() if domain_col in issue_df.columns else pd.DataFrame()
+        if domain_df.empty:
+            rows.append(
+                {
+                    ("核对顺序" if is_cn else "step"): idx,
+                    ("核对侧" if is_cn else "domain"): domain,
+                    ("检查结果" if is_cn else "status"): status_ok,
+                    ("重点证据" if is_cn else "evidence"): normal_text,
+                    ("建议动作" if is_cn else "action"): action_text,
+                }
+            )
+            continue
+
+        if abs_col in domain_df.columns:
+            domain_df = domain_df.assign(_abs_gap=pd.to_numeric(domain_df[abs_col], errors="coerce")).sort_values(
+                "_abs_gap",
+                ascending=False,
+                na_position="last",
+            )
+        main_issue = domain_df.iloc[0]
+        evidence_parts = [
+            str(main_issue.get(warehouse_col, "")).strip(),
+            str(main_issue.get(issue_col, "")).strip(),
+            str(main_issue.get(current_col, "")).strip(),
+            str(main_issue.get(gap_col, "")).strip(),
+        ]
+        evidence = " | ".join(part for part in evidence_parts if part and part != "nan")
+        rows.append(
+            {
+                ("核对顺序" if is_cn else "step"): idx,
+                ("核对侧" if is_cn else "domain"): domain,
+                ("检查结果" if is_cn else "status"): status_review,
+                ("重点证据" if is_cn else "evidence"): evidence,
+                ("建议动作" if is_cn else "action"): f"{check_text}；{action_text}" if is_cn else f"{check_text}. {action_text}",
+            }
+        )
+
+    has_stockout = issue_df[issue_col].eq(stockout_issue).any() if issue_col in issue_df.columns else False
+    has_overstock = issue_df[issue_col].eq(overstock_issue).any() if issue_col in issue_df.columns else False
+    if has_stockout and has_overstock:
+        conflict_row[("核对顺序" if is_cn else "step")] = len(rows) + 1
+        rows.append(conflict_row)
+
+    return pd.DataFrame(rows)

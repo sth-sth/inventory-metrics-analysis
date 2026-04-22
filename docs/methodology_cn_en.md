@@ -18,10 +18,13 @@ Interpretation / 解读:
 
 - Stockout Risk when coverage_gap < threshold
 - 缺货风险：coverage_gap 低于阈值
-- Overstock Risk when DOH > threshold
-- 超储风险：DOH 超过阈值
+- Overstock Risk when DOH > threshold, but only after stockout check passes for the same SKU
+- 超储风险：DOH 超过阈值，但同一 SKU 先通过缺货检查后才判定
 - Supplier Delay when receipt delay_days > threshold
 - 供应商延迟：收货 delay_days 超过阈值
+
+When a SKU appears to satisfy both stockout and overstock signals, the app keeps shortage as the higher-priority operating status and emits a logic-review checklist item.
+当同一 SKU 表面上同时满足缺货和超储信号时，系统会优先保留缺货作为经营状态，并额外提示口径复核。
 
 ## 3. Attribution Logic / 归因逻辑
 

@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 
 
-def build_inventory_metrics(inventory: pd.DataFrame) -> pd.DataFrame:
+def build_inventory_metrics(
+    inventory: pd.DataFrame,
+    stockout_gap_threshold: float = 0.0,
+    overstock_doh_threshold: float = 120.0,
+) -> pd.DataFrame:
     df = inventory.copy()
     df["doh"] = np.where(df["avg_daily_demand"] > 0, df["on_hand_qty"] / df["avg_daily_demand"], np.nan)
     df["inventory_value"] = df["on_hand_qty"] * df["unit_cost"]
@@ -16,11 +20,14 @@ def build_inventory_metrics(inventory: pd.DataFrame) -> pd.DataFrame:
     df["reorder_point"] = df["lead_time_demand"] + df["safety_stock"]
     df["coverage_gap"] = df["on_hand_qty"] - df["reorder_point"]
 
+    stockout_mask = df["coverage_gap"] < stockout_gap_threshold
+    overstock_mask = (df["doh"] > overstock_doh_threshold) & ~stockout_mask
+
     df["inventory_health"] = np.select(
         [
-            df["coverage_gap"] < 0,
-            (df["doh"] > 120),
-            (df["doh"].between(20, 90, inclusive="both")),
+            stockout_mask,
+            overstock_mask,
+            (df["doh"].between(20, 90, inclusive="both")) & ~stockout_mask & ~overstock_mask,
         ],
         ["Stockout Risk", "Overstock Risk", "Healthy"],
         default="Watch",

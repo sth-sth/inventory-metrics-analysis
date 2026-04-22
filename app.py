@@ -608,7 +608,13 @@ else:
 
 with st.expander(t["demo_block"], expanded=False):
     demo_inv, demo_tx = load_demo_data()
-    demo_plan = abc_classification(build_inventory_metrics(demo_inv))
+    demo_plan = abc_classification(
+        build_inventory_metrics(
+            demo_inv,
+            stockout_gap_threshold=stockout_threshold,
+            overstock_doh_threshold=overstock_doh,
+        )
+    )
     c1, c2 = st.columns(2)
     with c1:
         st.write(t["preview_inv"])
@@ -637,7 +643,13 @@ with st.expander(t["demo_block"], expanded=False):
         language=language,
     )
 
-metrics_df = abc_classification(build_inventory_metrics(inventory_df))
+metrics_df = abc_classification(
+    build_inventory_metrics(
+        inventory_df,
+        stockout_gap_threshold=stockout_threshold,
+        overstock_doh_threshold=overstock_doh,
+    )
+)
 alerts_df = detect_alerts(
     metrics_df,
     transactions_df,
@@ -793,7 +805,13 @@ with tab4:
     sim_input["avg_daily_demand"] = sim_input["avg_daily_demand"] * (1 + demand_shift / 100)
     sim_input["lead_time_days"] = np.clip(sim_input["lead_time_days"] * (1 + lead_shift / 100), 0, None)
 
-    sim_metrics = abc_classification(build_inventory_metrics(sim_input))
+    sim_metrics = abc_classification(
+        build_inventory_metrics(
+            sim_input,
+            stockout_gap_threshold=stockout_threshold,
+            overstock_doh_threshold=overstock_doh,
+        )
+    )
 
     r1, r2, r3 = st.columns(3)
     r1.metric(t["risk_now"], int((filtered_metrics["coverage_gap"] < 0).sum()))

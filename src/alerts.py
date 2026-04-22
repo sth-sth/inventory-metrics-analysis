@@ -27,7 +27,10 @@ def detect_alerts(metrics_df: pd.DataFrame, transactions: pd.DataFrame, cfg: Ale
             }
         )
 
-    overstock = metrics_df[metrics_df["doh"] > cfg.overstock_doh_threshold]
+    overstock = metrics_df[
+        (metrics_df["coverage_gap"] >= cfg.stockout_gap_threshold)
+        & (metrics_df["doh"] > cfg.overstock_doh_threshold)
+    ]
     for _, r in overstock.iterrows():
         alerts.append(
             {

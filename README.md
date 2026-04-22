@@ -100,9 +100,11 @@ Upload both files:
 - Demand forecast deviation: actual daily demand vs forecast daily demand
 - Receipt delay: average receipt delay vs the threshold in the sidebar
 - Inventory gap: on-hand quantity minus reorder point
-- High inventory coverage: days of inventory vs the overstock threshold
+- High inventory coverage: days of inventory vs the overstock threshold; overstock is only treated as a separate operating status when the SKU is not already in stockout risk
 - Data lag: inventory snapshot date vs the latest transaction date
 - Cycle count accuracy: stored accuracy value vs 100%
+
+The attribution page now starts with SKU selection and shows a four-domain business checklist, so a planner can review demand, supply, warehouse, and process checks for the chosen SKU in one place.
 
 ### Replenishment base qty / 补货基础量
 
