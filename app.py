@@ -24,20 +24,6 @@ html, body, [class*="css"] {
     font-family: 'Space Grotesk', sans-serif;
 }
 .stApp {
-
-@st.cache_data(show_spinner=False)
-def load_demo_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    root = Path(__file__).parent
-    with open(root / "data" / "inventory_demo.csv", "rb") as inv_f, open(root / "data" / "transactions_demo.csv", "rb") as tx_f:
-        return load_inventory_csv(inv_f), load_transactions_csv(tx_f)
-
-
-def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    if df is None or df.empty:
-        return b""
-    return df.to_csv(index=False).encode("utf-8")
-
-
     background:
         radial-gradient(circle at 0% 0%, rgba(14,165,164,0.12), transparent 40%),
         radial-gradient(circle at 100% 100%, rgba(15,39,64,0.08), transparent 30%),
@@ -63,6 +49,19 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
 """,
     unsafe_allow_html=True,
 )
+
+
+@st.cache_data(show_spinner=False)
+def load_demo_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    root = Path(__file__).parent
+    with open(root / "data" / "inventory_demo.csv", "rb") as inv_f, open(root / "data" / "transactions_demo.csv", "rb") as tx_f:
+        return load_inventory_csv(inv_f), load_transactions_csv(tx_f)
+
+
+def to_csv_bytes(df: pd.DataFrame) -> bytes:
+    if df is None or df.empty:
+        return b""
+    return df.to_csv(index=False).encode("utf-8")
 
 
 def enrich_metrics_with_tx_signals(metrics_df: pd.DataFrame, transactions_df: pd.DataFrame) -> pd.DataFrame:
