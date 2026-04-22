@@ -741,9 +741,9 @@ with tab2:
 
 with tab3:
     st.caption(
-        "这里是全量 SKU 的真实偏差清单，按四个侧筛选后点任意单元格即可看来源和计算说明。"
+        "先选 SKU，再按四个侧筛选；同一 SKU 若同时出现缺货与超储表观信号，会在业务核对里提示口径复核。"
         if language == "中文"
-        else "This is the full real-deviation inventory across SKUs. Filter by the four domains, then click any cell for source and calculation details."
+        else "Pick a SKU first, then filter by the four domains; if the same SKU shows both stockout and overstock signals, the checklist will flag a logic review."
     )
 
     issue_inventory_df = build_issue_inventory_table(
@@ -754,39 +754,58 @@ with tab3:
         delay_days=delay_days,
     )
 
-    if language == "中文":
-        domain_options = ["需求侧", "供应侧", "仓储侧", "流程侧"]
-        selected_domains = st.multiselect("按分类筛选", options=domain_options, default=domain_options)
-        issue_view_df = issue_inventory_df[issue_inventory_df["分类"].isin(selected_domains)].copy() if "分类" in issue_inventory_df.columns else issue_inventory_df
+    if issue_inventory_df.empty:
+        st.info("当前筛选下暂无可用归因数据。" if language == "中文" else "No attribution data under current filters.")
     else:
-        domain_options = ["Demand", "Supply", "Warehouse", "Process"]
-        selected_domains = st.multiselect("Filter by domain", options=domain_options, default=domain_options)
-        issue_view_df = issue_inventory_df[issue_inventory_df["domain"].isin(selected_domains)].copy() if "domain" in issue_inventory_df.columns else issue_inventory_df
-
-    st.markdown("#### " + ("四侧问题识别清单" if language == "中文" else "Four-domain Issue Inventory"))
-    render_calc_table(issue_view_df, key="all_issue_inventory_table", language=language)
-
-    issue_rec_df = build_issue_recommendations(issue_view_df, language)
-    st.subheader("自动化建议" if language == "中文" else "Automated Suggestions")
-    render_calc_table(issue_rec_df, key="issue_recommendation_table", language=language)
-
-    if not issue_view_df.empty:
-        main_issue = issue_view_df.iloc[0]
         if language == "中文":
-            card_rows = [
-                {"分类": main_issue.get("分类", ""), "SKU": main_issue.get("sku", ""), "仓库": main_issue.get("warehouse", "")},
-                {"问题": main_issue.get("问题", ""), "当前值": main_issue.get("当前值", ""), "差了多少": main_issue.get("差了多少", "")},
-                {"是否超阈值": main_issue.get("是否超阈值", ""), "怎么算": main_issue.get("怎么算", "")},
-                {"建议": main_issue.get("建议看什么", "")},
-            ]
+            sku_options = sorted(issue_inventory_df["sku"].dropna().astype(str).unique().tolist()) if "sku" in issue_inventory_df.columns else []
+            selected_sku = st.selectbox(t["pick_sku"], options=["全部SKU"] + sku_options, index=0, key="sku_issue_selector")
         else:
-            card_rows = [
-                {"domain": main_issue.get("domain", ""), "SKU": main_issue.get("sku", ""), "warehouse": main_issue.get("warehouse", "")},
-                {"issue": main_issue.get("issue", ""), "current": main_issue.get("current", ""), "gap": main_issue.get("gap", "")},
-                {"out_of_bound": main_issue.get("out_of_bound", ""), "how": main_issue.get("how", "")},
-                {"action": main_issue.get("what_to_check", "")},
-            ]
-        render_selected_card("已选问题" if language == "中文" else "Selected issue", card_rows, language)
+            sku_options = sorted(issue_inventory_df["sku"].dropna().astype(str).unique().tolist()) if "sku" in issue_inventory_df.columns else []
+            selected_sku = st.selectbox(t["pick_sku"], options=["All SKUs"] + sku_options, index=0, key="sku_issue_selector")
+
+        if selected_sku in {"全部SKU", "All SKUs"}:
+            sku_issue_df = issue_inventory_df.copy()
+        else:
+            sku_issue_df = issue_inventory_df[issue_inventory_df["sku"].astype(str) == selected_sku].copy() if "sku" in issue_inventory_df.columns else issue_inventory_df.copy()
+
+        checklist_df = build_business_checklist(sku_issue_df, language)
+        st.subheader("业务核对清单" if language == "中文" else "Business checklist")
+        render_calc_table(checklist_df, key="business_checklist_table", language=language)
+
+        if language == "中文":
+            domain_options = ["需求侧", "供应侧", "仓储侧", "流程侧"]
+            selected_domains = st.multiselect("按分类筛选", options=domain_options, default=domain_options)
+            issue_view_df = sku_issue_df[sku_issue_df["分类"].isin(selected_domains)].copy() if "分类" in sku_issue_df.columns else sku_issue_df
+        else:
+            domain_options = ["Demand", "Supply", "Warehouse", "Process"]
+            selected_domains = st.multiselect("Filter by domain", options=domain_options, default=domain_options)
+            issue_view_df = sku_issue_df[sku_issue_df["domain"].isin(selected_domains)].copy() if "domain" in sku_issue_df.columns else sku_issue_df
+
+        st.markdown("#### " + ("四侧问题识别清单" if language == "中文" else "Four-domain Issue Inventory"))
+        render_calc_table(issue_view_df, key="all_issue_inventory_table", language=language)
+
+        issue_rec_df = build_issue_recommendations(issue_view_df, language)
+        st.subheader("自动化建议" if language == "中文" else "Automated Suggestions")
+        render_calc_table(issue_rec_df, key="issue_recommendation_table", language=language)
+
+        if not issue_view_df.empty:
+            main_issue = issue_view_df.iloc[0]
+            if language == "中文":
+                card_rows = [
+                    {"分类": main_issue.get("分类", ""), "SKU": main_issue.get("sku", ""), "仓库": main_issue.get("warehouse", "")},
+                    {"问题": main_issue.get("问题", ""), "当前值": main_issue.get("当前值", ""), "差了多少": main_issue.get("差了多少", "")},
+                    {"是否超阈值": main_issue.get("是否超阈值", ""), "怎么算": main_issue.get("怎么算", "")},
+                    {"建议": main_issue.get("建议看什么", "")},
+                ]
+            else:
+                card_rows = [
+                    {"domain": main_issue.get("domain", ""), "SKU": main_issue.get("sku", ""), "warehouse": main_issue.get("warehouse", "")},
+                    {"issue": main_issue.get("issue", ""), "current": main_issue.get("current", ""), "gap": main_issue.get("gap", "")},
+                    {"out_of_bound": main_issue.get("out_of_bound", ""), "how": main_issue.get("how", "")},
+                    {"action": main_issue.get("what_to_check", "")},
+                ]
+            render_selected_card("已选问题" if language == "中文" else "Selected issue", card_rows, language)
 
 with tab4:
     recs_df = generate_recommendations(filtered_metrics, language)
