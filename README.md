@@ -20,6 +20,30 @@ streamlit run app.py
 - Budget-constrained replenishment plan / 预算约束下的补货决策
 - One-click CSV exports for decisions / 一键导出决策清单
 
+## 2.1 One-Page Logic / 一页讲清楚（重点）
+
+### 信息源（数字来自哪里）
+
+- 库存总价值、DOH、Gap、缺货/超储判断：来自 `inventory.csv`
+- 周转率代理：销售量来自 `transactions.csv`，平均库存来自 `inventory.csv`
+- 服务水平代理：来自 `coverage_gap`（由库存字段计算）
+
+### 核心计算（数字怎么算）
+
+- `DOH = on_hand_qty / avg_daily_demand`
+- `lead_time_demand = avg_daily_demand * lead_time_days`
+- `safety_stock = 1.65 * std(avg_daily_demand) * sqrt(lead_time_days)`
+- `reorder_point = lead_time_demand + safety_stock`
+- `coverage_gap = on_hand_qty - reorder_point`
+- `库存总价值 = sum(on_hand_qty * unit_cost)`
+- `周转率代理 = sum(sale_qty) / mean(on_hand_qty)`
+- `服务水平代理 = count(coverage_gap >= 0) / count(SKU)`
+
+### 页面内对应位置
+
+- KPI 下方新增 “数字从哪里来（信息源与计算逻辑）” 区域
+- 区域内包含：信息源总表、指标公式总表、当前筛选下 KPI 计算展开
+
 ## 3. Input Modes / 数据输入模式
 
 ### Demo Mode / 演示模式
