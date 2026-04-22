@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -7,7 +9,7 @@ import streamlit as st
 
 from src.alerts import AlertConfig, detect_alerts
 from src.attribution import build_issue_breakdown
-from src.data_io import load_bundle
+from src.data_io import load_bundle, load_inventory_csv, load_transactions_csv
 from src.metrics import abc_classification, build_inventory_metrics, build_kpi_summary
 from src.recommendations import generate_recommendations
 
@@ -22,6 +24,20 @@ html, body, [class*="css"] {
     font-family: 'Space Grotesk', sans-serif;
 }
 .stApp {
+
+@st.cache_data(show_spinner=False)
+def load_demo_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    root = Path(__file__).parent
+    with open(root / "data" / "inventory_demo.csv", "rb") as inv_f, open(root / "data" / "transactions_demo.csv", "rb") as tx_f:
+        return load_inventory_csv(inv_f), load_transactions_csv(tx_f)
+
+
+def to_csv_bytes(df: pd.DataFrame) -> bytes:
+    if df is None or df.empty:
+        return b""
+    return df.to_csv(index=False).encode("utf-8")
+
+
     background:
         radial-gradient(circle at 0% 0%, rgba(14,165,164,0.12), transparent 40%),
         radial-gradient(circle at 100% 100%, rgba(15,39,64,0.08), transparent 30%),
@@ -321,7 +337,9 @@ TXT = {
         "desc": "用于库存监控、风险归因、场景模拟和补货决策的可视化系统。",
         "panel": "控制面板",
         "source": "数据来源",
-        "source_hint": "仅使用你上传的真实业务 CSV",
+        "source_hint": "支持一键运行演示数据或上传真实业务 CSV",
+        "demo": "使用内置演示数据（直接运行）",
+        "upload": "上传真实业务 CSV",
         "inv_csv": "库存快照 CSV",
         "tx_csv": "交易流水 CSV",
         "threshold": "阈值参数",
@@ -336,6 +354,13 @@ TXT = {
         "service": "目标服务水平",
         "need_upload": "请上传真实业务的两份 CSV 文件后再分析。",
         "load_fail": "数据加载失败",
+        "demo_ok": "演示数据已加载并开始分析。",
+        "demo_block": "演示数据预览与下载",
+        "preview_inv": "库存演示数据预览",
+        "preview_tx": "交易演示数据预览",
+        "download_inv": "下载库存演示 CSV",
+        "download_tx": "下载交易演示 CSV",
+        "preview_plan": "演示数据计算后预览",
         "formula": "问题清单与计算说明",
         "lineage": "数据来源与计算链路",
         "lineage_tip": "先看来源字段，再看差了多少，再看怎么算。",
@@ -391,7 +416,9 @@ TXT = {
         "desc": "Visual system for inventory monitoring, risk attribution, simulation, and replenishment decisions.",
         "panel": "Control Panel",
         "source": "Data Source",
-        "source_hint": "Only use your uploaded real business CSVs",
+        "source_hint": "Run built-in demo instantly or upload real business CSVs",
+        "demo": "Use built-in demo data (run now)",
+        "upload": "Upload real business CSVs",
         "inv_csv": "Inventory snapshot CSV",
         "tx_csv": "Transactions CSV",
         "threshold": "Threshold Settings",
@@ -406,6 +433,13 @@ TXT = {
         "service": "Target service level",
         "need_upload": "Upload both real business CSV files before analysis.",
         "load_fail": "Data loading failed",
+        "demo_ok": "Demo data loaded and analysis started.",
+        "demo_block": "Demo Data Preview and Download",
+        "preview_inv": "Inventory demo preview",
+        "preview_tx": "Transactions demo preview",
+        "download_inv": "Download inventory demo CSV",
+        "download_tx": "Download transactions demo CSV",
+        "preview_plan": "Computed preview on demo data",
         "formula": "Issue List and Calculation Notes",
         "lineage": "Data Source and Calculation Lineage",
         "lineage_tip": "Check source fields first, then the gap, then the calculation.",
@@ -466,6 +500,7 @@ with st.sidebar:
     st.header(t["panel"])
     st.subheader(t["source"])
     st.caption(t["source_hint"])
+    source_mode = st.radio(t["source"], [t["demo"], t["upload"]], index=0)
 
     st.markdown("---")
     st.subheader(t["threshold"])
@@ -492,21 +527,57 @@ st.markdown(
 inventory_file = None
 transactions_file = None
 
-c_up_1, c_up_2 = st.columns(2)
-with c_up_1:
-    inventory_file = st.file_uploader(t["inv_csv"], type=["csv"])
-with c_up_2:
-    transactions_file = st.file_uploader(t["tx_csv"], type=["csv"])
+if source_mode == t["upload"]:
+    c_up_1, c_up_2 = st.columns(2)
+    with c_up_1:
+        inventory_file = st.file_uploader(t["inv_csv"], type=["csv"])
+    with c_up_2:
+        transactions_file = st.file_uploader(t["tx_csv"], type=["csv"])
 
-if not inventory_file or not transactions_file:
-    st.info(t["need_upload"])
-    st.stop()
-try:
-    bundle = load_bundle(inventory_file, transactions_file)
-    inventory_df, transactions_df = bundle.inventory, bundle.transactions
-except Exception as exc:
-    st.error(f"{t['load_fail']}: {exc}")
-    st.stop()
+if source_mode == t["demo"]:
+    inventory_df, transactions_df = load_demo_data()
+    st.success(t["demo_ok"])
+else:
+    if not inventory_file or not transactions_file:
+        st.info(t["need_upload"])
+        st.stop()
+    try:
+        bundle = load_bundle(inventory_file, transactions_file)
+        inventory_df, transactions_df = bundle.inventory, bundle.transactions
+    except Exception as exc:
+        st.error(f"{t['load_fail']}: {exc}")
+        st.stop()
+
+with st.expander(t["demo_block"], expanded=False):
+    demo_inv, demo_tx = load_demo_data()
+    demo_plan = abc_classification(build_inventory_metrics(demo_inv))
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write(t["preview_inv"])
+        render_calc_table(demo_inv.head(10), key="demo_inv_table", language=language)
+        st.download_button(t["download_inv"], to_csv_bytes(demo_inv), "inventory_demo.csv", "text/csv")
+    with c2:
+        st.write(t["preview_tx"])
+        render_calc_table(demo_tx.head(10), key="demo_tx_table", language=language)
+        st.download_button(t["download_tx"], to_csv_bytes(demo_tx), "transactions_demo.csv", "text/csv")
+
+    st.write(t["preview_plan"])
+    render_calc_table(
+        demo_plan[[
+            "sku",
+            "warehouse",
+            "on_hand_qty",
+            "avg_daily_demand",
+            "lead_time_days",
+            "lead_time_demand",
+            "safety_stock",
+            "reorder_point",
+            "coverage_gap",
+            "abc_class",
+        ]].head(10),
+        key="demo_plan_table",
+        language=language,
+    )
 
 st.caption("点图上的柱子、点、或按钮，就能看到它怎么计算出来。" if language == "中文" else "Click a bar, point, or button to see exactly how it is calculated.")
 
