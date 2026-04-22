@@ -759,10 +759,10 @@ with tab3:
     else:
         if language == "中文":
             sku_options = sorted(issue_inventory_df["sku"].dropna().astype(str).unique().tolist()) if "sku" in issue_inventory_df.columns else []
-            selected_sku = st.selectbox(t["pick_sku"], options=["全部SKU"] + sku_options, index=0, key="sku_issue_selector")
+            selected_sku = st.selectbox(t.get("pick_sku", "选择 SKU 查看问题清单"), options=["全部SKU"] + sku_options, index=0, key="sku_issue_selector")
         else:
             sku_options = sorted(issue_inventory_df["sku"].dropna().astype(str).unique().tolist()) if "sku" in issue_inventory_df.columns else []
-            selected_sku = st.selectbox(t["pick_sku"], options=["All SKUs"] + sku_options, index=0, key="sku_issue_selector")
+            selected_sku = st.selectbox(t.get("pick_sku", "Select SKU for issue breakdown"), options=["All SKUs"] + sku_options, index=0, key="sku_issue_selector")
 
         if selected_sku in {"全部SKU", "All SKUs"}:
             sku_issue_df = issue_inventory_df.copy()
