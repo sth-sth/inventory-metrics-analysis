@@ -8,7 +8,7 @@ import plotly.express as px
 import streamlit as st
 
 from src.alerts import AlertConfig, detect_alerts
-from src.attribution import build_issue_breakdown
+from src.attribution import build_business_checklist, build_issue_breakdown
 from src.data_io import load_bundle, load_inventory_csv, load_transactions_csv
 from src.metrics import abc_classification, build_inventory_metrics, build_kpi_summary
 from src.recommendations import generate_recommendations
