@@ -16,6 +16,7 @@ streamlit run app.py
 - Demo + upload data modes / 演示数据与上传数据双模式
 - KPI automation and alerting / 自动 KPI 与风险报警
 - Evidence-based attribution / 基于证据的归因分析
+- Quantitative attribution in units / 按件数输出的量化归因
 - Smart scenario simulation / 智能场景模拟
 - Budget-constrained replenishment plan / 预算约束下的补货决策
 - One-click CSV exports for decisions / 一键导出决策清单
@@ -32,7 +33,7 @@ streamlit run app.py
 
 - `DOH = on_hand_qty / avg_daily_demand`
 - `lead_time_demand = avg_daily_demand * lead_time_days`
-- `safety_stock = 1.65 * std(avg_daily_demand) * sqrt(lead_time_days)`
+- `safety_stock = z * std(avg_daily_demand) * sqrt(lead_time_days)`（`z` 可在侧边栏调整，默认 1.65）
 - `reorder_point = lead_time_demand + safety_stock`
 - `coverage_gap = on_hand_qty - reorder_point`
 - `库存总价值 = sum(on_hand_qty * unit_cost)`
@@ -105,6 +106,9 @@ Upload both files:
 - Cycle count accuracy: stored accuracy value vs 100%
 
 The attribution page now starts with SKU selection and shows a four-domain business checklist, so a planner can review demand, supply, warehouse, and process checks for the chosen SKU in one place.
+
+The attribution page also includes a quantitative decomposition table in units with default dual perspective (`shortage + excess`).
+When `forecast_daily_demand` is missing, the app uses a 7-sale-day rolling mean fallback and labels the forecast source in outputs.
 
 ### Replenishment base qty / 补货基础量
 

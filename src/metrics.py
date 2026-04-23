@@ -8,6 +8,7 @@ def build_inventory_metrics(
     inventory: pd.DataFrame,
     stockout_gap_threshold: float = 0.0,
     overstock_doh_threshold: float = 120.0,
+    service_level_z: float = 1.65,
 ) -> pd.DataFrame:
     df = inventory.copy()
     df["doh"] = np.where(df["avg_daily_demand"] > 0, df["on_hand_qty"] / df["avg_daily_demand"], np.nan)
@@ -15,7 +16,7 @@ def build_inventory_metrics(
     df["lead_time_demand"] = df["avg_daily_demand"] * df["lead_time_days"]
 
     demand_std = df["avg_daily_demand"].std(ddof=0) if len(df) > 1 else 0.0
-    z_score = 1.65
+    z_score = float(service_level_z)
     df["safety_stock"] = z_score * demand_std * np.sqrt(df["lead_time_days"].clip(lower=0))
     df["reorder_point"] = df["lead_time_demand"] + df["safety_stock"]
     df["coverage_gap"] = df["on_hand_qty"] - df["reorder_point"]

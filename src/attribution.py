@@ -24,6 +24,7 @@ def build_issue_breakdown(metric_row: pd.Series, language: str, stockout_thresho
 
     avg_daily_demand = _num_or_none(metric_row, "avg_daily_demand")
     forecast_daily_demand = _num_or_none(metric_row, "forecast_daily_demand")
+    forecast_source = str(metric_row.get("forecast_source", "provided"))
     avg_delay_days = _num_or_none(metric_row, "avg_delay_days")
     on_hand_qty = _num_or_none(metric_row, "on_hand_qty")
     reorder_point = _num_or_none(metric_row, "reorder_point")
@@ -69,18 +70,25 @@ def build_issue_breakdown(metric_row: pd.Series, language: str, stockout_thresho
     else:
         demand_gap = avg_daily_demand - forecast_daily_demand
         demand_pct = abs(demand_gap) / max(abs(forecast_daily_demand), 1e-9)
+        using_fallback = forecast_source == "rolling_mean_7d"
+        cn_source_note = "（预测由近 7 个销售日滚动均值替代）" if using_fallback else ""
+        en_source_note = " (forecast replaced by 7-sale-day rolling mean)" if using_fallback else ""
+        cn_how = "实际日均需求 - 预测日均需求（预测缺失时使用近 7 个销售日滚动均值替代）。" if using_fallback else "实际日均需求 - 预测日均需求。"
+        en_how = "actual daily demand - forecast daily demand (fallback uses 7-sale-day rolling mean when forecast is missing)" if using_fallback else "actual daily demand - forecast daily demand"
+        cn_check = "该 SKU 预测缺失，当前用滚动均值替代；建议补齐正式预测字段。" if using_fallback else "偏差大时核对促销、季节、异常订单。"
+        en_check = "Forecast is missing for this SKU and replaced by rolling mean; provide official forecast field when available." if using_fallback else "Validate promotion, seasonality, abnormal orders when deviation is large."
         cn_rows.append(
             {
                 "sku": sku,
                 "warehouse": warehouse,
                 "问题": "需求预测偏差",
                 "来自哪里": "inventory.csv + transactions.csv",
-                "当前值": f"实际 {avg_daily_demand:.2f}，预测 {forecast_daily_demand:.2f}",
+                "当前值": f"实际 {avg_daily_demand:.2f}，预测 {forecast_daily_demand:.2f}{cn_source_note}",
                 "阈值/基准": "无固定阈值，按业务判断",
                 "差了多少": f"差值 {demand_gap:+.2f}，相对误差 {demand_pct:.1%}",
                 "是否超阈值": "人工判断",
-                "怎么算": "实际日均需求 - 预测日均需求。",
-                "建议看什么": "偏差大时核对促销、季节、异常订单。",
+                "怎么算": cn_how,
+                "建议看什么": cn_check,
                 "偏差绝对值": abs(demand_gap),
             }
         )
@@ -90,12 +98,12 @@ def build_issue_breakdown(metric_row: pd.Series, language: str, stockout_thresho
                 "warehouse": warehouse,
                 "issue": "Demand forecast deviation",
                 "source": "inventory.csv + transactions.csv",
-                "current": f"actual {avg_daily_demand:.2f}, forecast {forecast_daily_demand:.2f}",
+                "current": f"actual {avg_daily_demand:.2f}, forecast {forecast_daily_demand:.2f}{en_source_note}",
                 "baseline": "no fixed threshold; business judgement",
                 "gap": f"delta {demand_gap:+.2f}, relative error {demand_pct:.1%}",
                 "out_of_bound": "manual review",
-                "how": "actual daily demand - forecast daily demand",
-                "what_to_check": "Validate promotion, seasonality, abnormal orders when deviation is large.",
+                "how": en_how,
+                "what_to_check": en_check,
                 "absolute_gap": abs(demand_gap),
             }
         )

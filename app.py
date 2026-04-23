@@ -12,6 +12,7 @@ from src.attribution import build_business_checklist, build_issue_breakdown
 from src.data_io import load_bundle, load_inventory_csv, load_transactions_csv
 from src.metrics import abc_classification, build_inventory_metrics, build_kpi_summary
 from src.recommendations import generate_recommendations
+from src.quant_attribution import build_quantitative_attribution
 
 
 st.set_page_config(page_title="Inventory Intelligence Cloud", layout="wide")
@@ -199,6 +200,39 @@ def enrich_metrics_with_tx_signals(metrics_df: pd.DataFrame, transactions_df: pd
     out["date"] = pd.to_datetime(out["date"], errors="coerce")
     out["latest_tx_date"] = pd.to_datetime(out["latest_tx_date"], errors="coerce")
     out["data_lag_days"] = (out["date"] - out["latest_tx_date"]).dt.days
+
+    # Forecast fallback: use latest 7-sale-day rolling mean when forecast is missing.
+    sales_daily = (
+        tx[tx["event_type"] == "sale"]
+        .groupby(["sku", "warehouse", "date"], as_index=False)["qty"]
+        .sum()
+        .sort_values(["sku", "warehouse", "date"])
+    )
+    if not sales_daily.empty:
+        sales_daily["forecast_rm7"] = sales_daily.groupby(["sku", "warehouse"])["qty"].transform(
+            lambda s: s.rolling(window=7, min_periods=3).mean()
+        )
+        fallback_fc = (
+            sales_daily.dropna(subset=["forecast_rm7"])
+            .groupby(["sku", "warehouse"], as_index=False)
+            .tail(1)[["sku", "warehouse", "forecast_rm7"]]
+        )
+        out = out.merge(fallback_fc, on=["sku", "warehouse"], how="left")
+    else:
+        out["forecast_rm7"] = np.nan
+
+    if "forecast_daily_demand" not in out.columns:
+        out["forecast_daily_demand"] = np.nan
+
+    provided_mask = out["forecast_daily_demand"].notna()
+    fallback_mask = (~provided_mask) & out["forecast_rm7"].notna()
+    out.loc[fallback_mask, "forecast_daily_demand"] = out.loc[fallback_mask, "forecast_rm7"]
+    out["forecast_source"] = np.select(
+        [provided_mask, fallback_mask],
+        ["provided", "rolling_mean_7d"],
+        default="missing",
+    )
+    out = out.drop(columns=["forecast_rm7"], errors="ignore")
     return out
 
 
@@ -394,6 +428,75 @@ def build_issue_recommendations(issue_df: pd.DataFrame, language: str) -> pd.Dat
     return out.reset_index(drop=True)
 
 
+def localize_quant_detail_table(detail_df: pd.DataFrame, language: str) -> pd.DataFrame:
+    if detail_df is None or detail_df.empty:
+        return detail_df
+
+    if language == "中文":
+        view_map = {"shortage": "缺口", "excess": "多余"}
+        factor_map = {
+            "demand": "需求偏差",
+            "lead_time": "交期偏差",
+            "data_lag": "数据滞后",
+            "record_accuracy": "盘点准确率",
+        }
+        domain_map = {"Demand": "需求侧", "Supply": "供应侧", "Process": "流程侧"}
+        out = detail_df.copy()
+        out["view"] = out["view"].map(view_map).fillna(out["view"])
+        out["factor"] = out["factor"].map(factor_map).fillna(out["factor"])
+        out["domain"] = out["domain"].map(domain_map).fillna(out["domain"])
+        out["computable"] = out["computable"].map({True: "可计算", False: "不可计算"})
+        out = out.rename(
+            columns={
+                "sku": "sku",
+                "warehouse": "warehouse",
+                "view": "视角",
+                "factor": "因素",
+                "domain": "分类",
+                "baseline_units": "基线数量",
+                "actual_units": "实际数量",
+                "total_change_units": "总变化",
+                "contribution_units": "因素贡献",
+                "contribution_share": "贡献占比",
+                "computable": "可计算性",
+                "reason": "不可计算原因",
+                "forecast_source": "预测来源",
+            }
+        )
+        return out
+
+    return detail_df.rename(
+        columns={
+            "view": "perspective",
+            "factor": "factor",
+            "domain": "domain",
+            "baseline_units": "baseline_units",
+            "actual_units": "actual_units",
+            "total_change_units": "total_change_units",
+            "contribution_units": "factor_contribution_units",
+            "contribution_share": "contribution_share",
+            "computable": "computable",
+            "reason": "not_computable_reason",
+            "forecast_source": "forecast_source",
+        }
+    )
+
+
+def localize_quant_summary_table(summary_df: pd.DataFrame, language: str) -> pd.DataFrame:
+    if summary_df is None or summary_df.empty:
+        return summary_df
+
+    if language == "中文":
+        view_map = {"shortage": "缺口", "excess": "多余"}
+        domain_map = {"Demand": "需求侧", "Supply": "供应侧", "Process": "流程侧"}
+        out = summary_df.copy()
+        out["view"] = out["view"].map(view_map).fillna(out["view"])
+        out["domain"] = out["domain"].map(domain_map).fillna(out["domain"])
+        return out.rename(columns={"view": "视角", "domain": "分类", "contribution_units": "贡献总量"})
+
+    return summary_df.rename(columns={"view": "perspective", "contribution_units": "contribution_units"})
+
+
 TXT = {
     "中文": {
         "lang_picker": "界面语言",
@@ -410,9 +513,11 @@ TXT = {
         "stockout": "缺货阈值（Gap < 阈值）",
         "overstock": "超储阈值（库存覆盖天数 > 阈值）",
         "delay": "延迟阈值（到货延迟天数 > 阈值）",
+        "service_z": "安全库存 Z 值",
         "stockout_help": "Gap 低于阈值时触发缺货风险。",
         "overstock_help": "库存覆盖天数过高时触发超储风险。",
         "delay_help": "收货延迟超过阈值时触发供应延迟报警。",
+        "service_z_help": "默认 1.65（约 95% 服务水平），可按业务风险偏好调整。",
         "decision": "决策参数",
         "budget": "补货预算上限",
         "service": "目标服务水平",
@@ -452,6 +557,10 @@ TXT = {
         "cat_filter": "按品类筛选",
         "kpi_formula_btn": "查看计算说明",
         "sim_formula_btn": "模拟说明",
+        "attr_view": "归因视角",
+        "attr_view_both": "缺口+多余",
+        "attr_view_shortage": "只看缺口",
+        "attr_view_excess": "只看多余",
     },
     "English": {
         "lang_picker": "Interface Language",
@@ -468,9 +577,11 @@ TXT = {
         "stockout": "Stockout threshold (Gap < threshold)",
         "overstock": "Overstock threshold (Days of Inventory > threshold)",
         "delay": "Delay threshold (Delay days > threshold)",
+        "service_z": "Safety stock z-value",
         "stockout_help": "Trigger stockout risk when Gap is below threshold.",
         "overstock_help": "Trigger overstock risk when inventory coverage days are too high.",
         "delay_help": "Trigger supplier delay alert when receipt delay exceeds threshold.",
+        "service_z_help": "Default 1.65 (~95% service level). Tune by risk preference.",
         "decision": "Decision Settings",
         "budget": "Replenishment budget cap",
         "service": "Target service level",
@@ -510,6 +621,10 @@ TXT = {
         "cat_filter": "Filter by category",
         "kpi_formula_btn": "View Calculation Notes",
         "sim_formula_btn": "Simulation Notes",
+        "attr_view": "Attribution view",
+        "attr_view_both": "Shortage + excess",
+        "attr_view_shortage": "Shortage only",
+        "attr_view_excess": "Excess only",
     },
 }
 
@@ -533,6 +648,7 @@ with st.sidebar:
     stockout_threshold = st.number_input(t["stockout"], value=0.0, step=1.0, help=t["stockout_help"])
     overstock_doh = st.number_input(t["overstock"], value=120.0, step=5.0, help=t["overstock_help"])
     delay_days = st.number_input(t["delay"], value=3.0, step=1.0, help=t["delay_help"])
+    service_level_z = st.number_input(t["service_z"], min_value=0.1, max_value=4.0, value=1.65, step=0.05, help=t["service_z_help"])
 
     st.markdown("---")
     st.subheader(t["decision"])
@@ -613,6 +729,7 @@ with st.expander(t["demo_block"], expanded=False):
             demo_inv,
             stockout_gap_threshold=stockout_threshold,
             overstock_doh_threshold=overstock_doh,
+            service_level_z=service_level_z,
         )
     )
     c1, c2 = st.columns(2)
@@ -648,6 +765,7 @@ metrics_df = abc_classification(
         inventory_df,
         stockout_gap_threshold=stockout_threshold,
         overstock_doh_threshold=overstock_doh,
+        service_level_z=service_level_z,
     )
 )
 alerts_df = detect_alerts(
@@ -676,6 +794,7 @@ if filtered_metrics.empty:
 filtered_alerts = alerts_df[alerts_df["warehouse"].isin(selected_wh)] if not alerts_df.empty else alerts_df
 filtered_tx = transactions_df[transactions_df["warehouse"].isin(selected_wh)].copy()
 filtered_metrics_for_attr = enrich_metrics_with_tx_signals(filtered_metrics, filtered_tx)
+quant_detail_df, quant_summary_df = build_quantitative_attribution(filtered_metrics_for_attr, service_level_z=service_level_z)
 
 kpis = build_kpi_summary(
     filtered_metrics,
@@ -769,21 +888,66 @@ with tab3:
         else:
             sku_issue_df = issue_inventory_df[issue_inventory_df["sku"].astype(str) == selected_sku].copy() if "sku" in issue_inventory_df.columns else issue_inventory_df.copy()
 
-        checklist_df = build_business_checklist(sku_issue_df, language)
+        perspective_options = [t["attr_view_both"], t["attr_view_shortage"], t["attr_view_excess"]]
+        selected_perspective = st.radio(t["attr_view"], options=perspective_options, index=0, horizontal=True)
+        if language == "中文":
+            if selected_perspective == t["attr_view_shortage"]:
+                perspective_df = sku_issue_df[sku_issue_df.get("问题", "").eq("库存缺口")].copy()
+            elif selected_perspective == t["attr_view_excess"]:
+                perspective_df = sku_issue_df[sku_issue_df.get("问题", "").eq("库存覆盖过高")].copy()
+            else:
+                perspective_df = sku_issue_df.copy()
+        else:
+            if selected_perspective == t["attr_view_shortage"]:
+                perspective_df = sku_issue_df[sku_issue_df.get("issue", "").eq("Inventory gap")].copy()
+            elif selected_perspective == t["attr_view_excess"]:
+                perspective_df = sku_issue_df[sku_issue_df.get("issue", "").eq("High inventory coverage")].copy()
+            else:
+                perspective_df = sku_issue_df.copy()
+
+        quant_view_filter = None
+        if selected_perspective == t["attr_view_shortage"]:
+            quant_view_filter = "shortage"
+        elif selected_perspective == t["attr_view_excess"]:
+            quant_view_filter = "excess"
+
+        quant_view_df = quant_detail_df.copy()
+        if selected_sku not in {"全部SKU", "All SKUs"} and "sku" in quant_view_df.columns:
+            quant_view_df = quant_view_df[quant_view_df["sku"].astype(str) == selected_sku].copy()
+        if quant_view_filter is not None and "view" in quant_view_df.columns:
+            quant_view_df = quant_view_df[quant_view_df["view"] == quant_view_filter].copy()
+
+        quant_summary_view_df = quant_summary_df.copy()
+        if quant_view_filter is not None and "view" in quant_summary_view_df.columns:
+            quant_summary_view_df = quant_summary_view_df[quant_summary_view_df["view"] == quant_view_filter].copy()
+
+        st.subheader("量化归因（单位：件）" if language == "中文" else "Quantitative Attribution (units)")
+        if quant_view_df.empty:
+            st.info("当前视角下暂无可计算的量化归因结果。" if language == "中文" else "No computable quantitative attribution under current view.")
+        else:
+            render_calc_table(localize_quant_detail_table(quant_view_df), key="quant_attr_detail_table", language=language)
+            st.caption(
+                "说明：贡献为反事实分解结果，贡献和等于总变化。" if language == "中文" else "Note: Contributions come from counterfactual decomposition; the sum equals total change."
+            )
+
+        st.subheader("量化归因汇总" if language == "中文" else "Attribution Summary")
+        render_calc_table(localize_quant_summary_table(quant_summary_view_df), key="quant_attr_summary_table", language=language)
+
+        checklist_df = build_business_checklist(perspective_df, language)
         st.subheader("业务核对清单" if language == "中文" else "Business checklist")
         if checklist_df.empty:
-            st.info("当前 SKU 没有需要核对的问题。" if language == "中文" else "No issues need business review for the selected SKU.")
+            st.info("当前视角下没有需要核对的问题。" if language == "中文" else "No issues need business review under current view.")
         else:
             render_calc_table(checklist_df, key="business_checklist_table", language=language)
 
         if language == "中文":
             domain_options = ["需求侧", "供应侧", "仓储侧", "流程侧"]
             selected_domains = st.multiselect("按分类筛选", options=domain_options, default=domain_options)
-            issue_view_df = sku_issue_df[sku_issue_df["分类"].isin(selected_domains)].copy() if "分类" in sku_issue_df.columns else sku_issue_df
+            issue_view_df = perspective_df[perspective_df["分类"].isin(selected_domains)].copy() if "分类" in perspective_df.columns else perspective_df
         else:
             domain_options = ["Demand", "Supply", "Warehouse", "Process"]
             selected_domains = st.multiselect("Filter by domain", options=domain_options, default=domain_options)
-            issue_view_df = sku_issue_df[sku_issue_df["domain"].isin(selected_domains)].copy() if "domain" in sku_issue_df.columns else sku_issue_df
+            issue_view_df = perspective_df[perspective_df["domain"].isin(selected_domains)].copy() if "domain" in perspective_df.columns else perspective_df
 
         st.markdown("#### " + ("四侧问题识别清单" if language == "中文" else "Four-domain Issue Inventory"))
         render_calc_table(issue_view_df, key="all_issue_inventory_table", language=language)
@@ -832,6 +996,7 @@ with tab4:
             sim_input,
             stockout_gap_threshold=stockout_threshold,
             overstock_doh_threshold=overstock_doh,
+            service_level_z=service_level_z,
         )
     )
 
