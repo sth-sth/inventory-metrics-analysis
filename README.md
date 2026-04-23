@@ -16,6 +16,7 @@ streamlit run app.py
 - Demo + upload data modes / 演示数据与上传数据双模式
 - KPI automation and alerting / 自动 KPI 与风险报警
 - Evidence-based attribution / 基于证据的归因分析
+- Quantitative attribution in units / 按件数输出的量化归因
 - Smart scenario simulation / 智能场景模拟
 - Budget-constrained replenishment plan / 预算约束下的补货决策
 - One-click CSV exports for decisions / 一键导出决策清单
@@ -32,7 +33,7 @@ streamlit run app.py
 
 - `DOH = on_hand_qty / avg_daily_demand`
 - `lead_time_demand = avg_daily_demand * lead_time_days`
-- `safety_stock = 1.65 * std(avg_daily_demand) * sqrt(lead_time_days)`
+- `safety_stock = z * std(avg_daily_demand) * sqrt(lead_time_days)`（`z` 可在侧边栏调整，默认 1.65）
 - `reorder_point = lead_time_demand + safety_stock`
 - `coverage_gap = on_hand_qty - reorder_point`
 - `库存总价值 = sum(on_hand_qty * unit_cost)`
@@ -85,7 +86,7 @@ Upload both files:
 - delay_days
 - supplier
 
-## 5. Formula Transparency / 公式透明化（细粒度评分）
+## 5. Issue Transparency / 问题透明化（不打分）
 
 ### Core formulas / 核心公式
 
@@ -95,14 +96,19 @@ Upload both files:
 - reorder_point = lead_time_demand + safety_stock
 - coverage_gap = on_hand_qty - reorder_point
 
-### Granular scoring / 细粒度评分
+### Issue breakdown / 问题拆解
 
-- Demand forecast error = |actual demand - forecast demand| / forecast demand, normalized to 0-1
-- Supplier delay score = avg_delay_days / 7, normalized to 0-1
-- ROP setting score = |coverage_gap| / reorder_point, normalized to 0-1
-- Info sync score = info_sync_delay_days / 5, normalized to 0-1
-- Domain score = mean of the factors in that domain
-- Overall score = mean of all factors across four domains
+- Demand forecast deviation: actual daily demand vs forecast daily demand
+- Receipt delay: average receipt delay vs the threshold in the sidebar
+- Inventory gap: on-hand quantity minus reorder point
+- High inventory coverage: days of inventory vs the overstock threshold; overstock is only treated as a separate operating status when the SKU is not already in stockout risk
+- Data lag: inventory snapshot date vs the latest transaction date
+- Cycle count accuracy: stored accuracy value vs 100%
+
+The attribution page now starts with SKU selection and shows a four-domain business checklist, so a planner can review demand, supply, warehouse, and process checks for the chosen SKU in one place.
+
+The attribution page also includes a quantitative decomposition table in units with default dual perspective (`shortage + excess`).
+When `forecast_daily_demand` is missing, the app uses a 7-sale-day rolling mean fallback and labels the forecast source in outputs.
 
 ### Replenishment base qty / 补货基础量
 

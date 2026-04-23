@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 
-def generate_recommendations(metrics_df: pd.DataFrame, factor_summary_df: pd.DataFrame, language: str = "中文") -> pd.DataFrame:
+def generate_recommendations(metrics_df: pd.DataFrame, language: str = "中文") -> pd.DataFrame:
     recs = []
     is_cn = language == "中文"
 
@@ -35,32 +35,6 @@ def generate_recommendations(metrics_df: pd.DataFrame, factor_summary_df: pd.Dat
                         f"DOH={r['doh']:.1f} 高于控制带"
                         if is_cn
                         else f"DOH={r['doh']:.1f} above control band"
-                    ),
-                }
-            )
-
-    if not factor_summary_df.empty and {"factor", "impact_score"}.issubset(factor_summary_df.columns):
-        top_factor = (
-            factor_summary_df.groupby("factor", as_index=False)["impact_score"]
-            .mean()
-            .sort_values("impact_score", ascending=False)
-            .head(1)
-        )
-        if not top_factor.empty:
-            f = top_factor.iloc[0]
-            recs.append(
-                {
-                    "sku": "ALL",
-                    "priority": "P1",
-                    "recommendation": (
-                        f"围绕主导风险因子“{f['factor']}”发起跨部门联动改善。"
-                        if is_cn
-                        else f"Launch cross-functional action on '{f['factor']}' as dominant risk driver."
-                    ),
-                    "why": (
-                        f"平均影响分={f['impact_score']:.2f}"
-                        if is_cn
-                        else f"average impact_score={f['impact_score']:.2f}"
                     ),
                 }
             )
